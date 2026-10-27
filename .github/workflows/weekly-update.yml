@@ -71,6 +71,11 @@ jobs:
             any::scales
             any::RANN
             any::data.table
+            any::shiny
+            any::bslib
+            any::leaflet
+            any::plotly
+            any::cachem
 
       # 快取：下載過的季資料 ZIP 和 OSM 圖資，下次直接用，不用每週重抓 1GB (也對政府伺服器比較禮貌)
       - uses: actions/cache@v4

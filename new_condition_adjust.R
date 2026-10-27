@@ -25,6 +25,10 @@ library(RPostgres)
 
 source(file.path(Sys.getenv("RE_PROJECT_PATH", "/Volumes/Dzzz_ssd/R所有資料/R_code/Code/All_data"), "config.R"))
 setwd(project_path)
+# 輸出用的資料夾先建好。app/data 在 .gitignore 裡，GitHub Actions 的乾淨主機上一開始不存在
+# (第一次在雲端跑時，就是因為這裡沒建資料夾而失敗；本機剛好已經有這個資料夾，所以沒發現)
+dir.create("models", showWarnings = FALSE)
+dir.create("app/data", recursive = TRUE, showWarnings = FALSE)
 options(features.as_library = TRUE)
 source("new_features.R")
 set.seed(2026)

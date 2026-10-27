@@ -126,7 +126,10 @@ jobs:
             any::data.table
 
       # 快取：下載過的季資料 ZIP 和 OSM 圖資，下次直接用，不用每週重抓 1GB (也對政府伺服器比較禮貌)
-      - uses: actions/cache@v4
+      # 拆成「讀取 (restore)」和「存檔 (save)」兩步：
+      #   actions/cache@v4 只有在「整個工作成功」時才存檔 → 前幾次後面的步驟失敗，資料每次都重新下載。
+      #   改成下載完 (空間特徵算完) 就存，不管後面成不成功 (if: always())
+      - uses: actions/cache/restore@v4
         with:
           path: |
             raw_history_zips
@@ -140,6 +143,13 @@ jobs:
         run: Rscript new_geocode.R
       - name: 空間特徵 (設施距離)
         run: Rscript new_features.R
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            raw_history_zips
+            geo_data
+          key: re-data-${{ github.run_id }}
       - name: 訓練模型
         run: Rscript new_model_training.R
       - name: 屋況與產權調整 (從備註量化影響)

@@ -6,12 +6,23 @@
 #   它就會在指定時間開一台乾淨的 Ubuntu 主機，照順序執行，做完就關機。
 #   公開 (public) 的 repo 完全免費。
 #
-# 這個流程每週一早上做的事：
-#   1. 開一台 Ubuntu + 一個臨時的 PostgreSQL 資料庫
-#   2. 下載實價登錄 (有新的季資料就會抓到) → ETL → 地理編碼 → 訓練模型 → 匯出 App 資料
-#   3. 部署到 shinyapps.io
+# 流程拆成 3 個工作 (job)，前一個成功才會執行下一個：
 #
-# 要先在 GitHub repo 設定 Secrets (Settings → Secrets and variables → Actions → New repository secret)：
+#   ① preflight 事前檢查 (約 3 分鐘)
+#        金鑰能不能登入 shinyapps.io？App 需要的套件裝得起來嗎？
+#        → 有問題「一開始」就失敗，不用等 ETL、訓練跑完才發現 (fail fast)
+#   ② build 建置 (約 25~45 分鐘)
+#        下載 → ETL → 地理編碼 → 空間特徵 → 訓練 → 屋況調整 → 匯出
+#        → 產出的 App 資料打包成「產物 (artifact)」保存在 GitHub 上
+#   ③ deploy 部署 (約 5 分鐘)
+#        取出 artifact → 部署到 shinyapps.io
+#
+# 為什麼要拆？
+#   原本是一個大工作：只要最後的部署失敗，重跑就得從下載資料開始，等 20 分鐘以上。
+#   拆開後，部署失敗只要在 GitHub 網頁按「Re-run failed jobs」(或 gh run rerun --failed)，
+#   就只重跑 ③，幾分鐘搞定。這也是業界 CI/CD「建置 (build) 與部署 (deploy) 分離」的做法。
+#
+# 要先在 GitHub repo 設定 Secrets (Settings → Secrets and variables → Actions)：
 #   SHINYAPPS_NAME、SHINYAPPS_TOKEN、SHINYAPPS_SECRET、ANTHROPIC_API_KEY (選填)
 # Secrets 是加密保存的，log 裡也會自動遮蔽，不會外洩。
 # ==============================================================================
@@ -22,12 +33,60 @@ on:
     - cron: "0 19 * * 0"     # 每週日 19:00 UTC = 台灣時間週一 03:00 (cron 用的是 UTC 時間)
   workflow_dispatch:          # 也可以在 GitHub 網頁上按按鈕手動執行 (測試用)
 
+# 所有工作共用的環境變數：讓 config.R 讀到雲端主機的路徑
+env:
+  RE_PROJECT_PATH: ${{ github.workspace }}
+
 jobs:
-  update:
+  # ---------------------------------------------------------------------------
+  # ① 事前檢查
+  # ---------------------------------------------------------------------------
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true        # 使用預先編譯好的套件，安裝快很多
+      - name: 安裝系統函式庫 (sf 需要的 GIS 工具)
+        run: sudo apt-get update && sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev
+      # 只裝「部署」要用的套件 (App 本身 + rsconnect)
+      # cpp11：tidyr 等套件編譯時需要，rsconnect 盤點套件版本時會檢查
+      # ⚠️ 註解不能寫在 packages: | 的區塊裡：多行文字區塊中的 # 會被當成套件名稱的一部分
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::rsconnect
+            any::shiny
+            any::bslib
+            any::leaflet
+            any::plotly
+            any::cachem
+            any::dplyr
+            any::sf
+            any::xgboost
+            any::RANN
+            any::scales
+            any::cpp11
+      - name: 事前檢查 (金鑰、App 套件)
+        env:
+          SHINYAPPS_NAME: ${{ secrets.SHINYAPPS_NAME }}
+          SHINYAPPS_TOKEN: ${{ secrets.SHINYAPPS_TOKEN }}
+          SHINYAPPS_SECRET: ${{ secrets.SHINYAPPS_SECRET }}
+        run: |
+          Rscript -e 'rsconnect::setAccountInfo(Sys.getenv("SHINYAPPS_NAME"), Sys.getenv("SHINYAPPS_TOKEN"), Sys.getenv("SHINYAPPS_SECRET")); cat("✓ shinyapps.io 金鑰有效\n")'
+          Rscript -e 'd <- rsconnect::appDependencies("app", appFiles = c("app.R", "shared_features.R")); cat("✓ App 需要的", nrow(d), "個套件都已安裝\n")'
+
+  # ---------------------------------------------------------------------------
+  # ② 建置：資料管線 + 模型
+  # ---------------------------------------------------------------------------
+  build:
+    needs: preflight                   # 事前檢查成功才執行
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
-    # 臨時的 PostgreSQL：只在這次執行期間存在，跑完就消失
+    # 臨時的 PostgreSQL：只在這個工作期間存在，跑完就消失
     services:
       postgres:
         image: postgres:16
@@ -39,27 +98,19 @@ jobs:
         options: >-
           --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
 
-    # 讓 config.R 讀到雲端主機的路徑與資料庫設定
     env:
-      RE_PROJECT_PATH: ${{ github.workspace }}
       PGHOST: localhost
       PGUSER: runner
       PGPASSWORD: runner
       PGDATABASE: postgres
 
     steps:
-      - uses: actions/checkout@v4          # 把 repo 的程式碼抓到雲端主機上
-
-      - uses: r-lib/actions/setup-r@v2     # 安裝 R
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
         with:
-          use-public-rspm: true            # 使用預先編譯好的套件，安裝快很多
-
+          use-public-rspm: true
       - name: 安裝系統函式庫 (sf 需要的 GIS 工具)
         run: sudo apt-get update && sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev
-
-      # 安裝 R 套件，並自動快取。
-      # cpp11：tidyr 等套件編譯時需要，rsconnect 部署前盤點套件版本時會檢查。
-      # ⚠️ 註解不能寫在下面 packages: | 的區塊裡：多行文字區塊中的 # 會被當成套件名稱的一部分
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           packages: |
@@ -70,27 +121,9 @@ jobs:
             any::sf
             any::ranger
             any::xgboost
-            any::rsconnect
             any::scales
             any::RANN
             any::data.table
-            any::shiny
-            any::bslib
-            any::leaflet
-            any::plotly
-            any::cachem
-            any::cpp11
-
-      # 事前檢查 (fail fast)：在花 20 分鐘跑 ETL、訓練之前，先確認「部署」會用到的東西都沒問題。
-      # 之前的失敗 (金鑰作廢、缺少 cpp11) 都要跑到最後一步才發現；放在這裡 1 分鐘內就會失敗
-      - name: 事前檢查 (金鑰、App 套件)
-        env:
-          SHINYAPPS_NAME: ${{ secrets.SHINYAPPS_NAME }}
-          SHINYAPPS_TOKEN: ${{ secrets.SHINYAPPS_TOKEN }}
-          SHINYAPPS_SECRET: ${{ secrets.SHINYAPPS_SECRET }}
-        run: |
-          Rscript -e 'rsconnect::setAccountInfo(Sys.getenv("SHINYAPPS_NAME"), Sys.getenv("SHINYAPPS_TOKEN"), Sys.getenv("SHINYAPPS_SECRET")); cat("✓ shinyapps.io 金鑰有效\n")'
-          Rscript -e 'd <- rsconnect::appDependencies("app", appFiles = c("app.R", "shared_features.R")); cat("✓ App 需要的", nrow(d), "個套件都已安裝\n")'
 
       # 快取：下載過的季資料 ZIP 和 OSM 圖資，下次直接用，不用每週重抓 1GB (也對政府伺服器比較禮貌)
       - uses: actions/cache@v4
@@ -113,6 +146,54 @@ jobs:
         run: Rscript new_condition_adjust.R
       - name: 匯出 App 資料
         run: Rscript new_export_app_data.R
+
+      # 把 App 需要的資料和模型打包成「產物」，交給下一個工作 (部署) 使用。
+      # 產物保存 7 天：部署失敗時，重跑部署工作就直接拿這份，不用重新建置
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-bundle
+          path: |
+            app/data
+            app/models
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # ③ 部署
+  # ---------------------------------------------------------------------------
+  deploy:
+    needs: build                       # 建置成功才執行
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: 安裝系統函式庫 (sf 需要的 GIS 工具)
+        run: sudo apt-get update && sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev
+      # 部署時 rsconnect 會盤點 App 用到的套件版本，所以 App 的套件要裝在這台主機上
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::rsconnect
+            any::shiny
+            any::bslib
+            any::leaflet
+            any::plotly
+            any::cachem
+            any::dplyr
+            any::sf
+            any::xgboost
+            any::RANN
+            any::scales
+            any::cpp11
+
+      # 取出建置工作打包的產物，放回 app/ 底下 (app/data、app/models)
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+          path: app
+
       - name: 部署到 shinyapps.io
         env:
           SHINYAPPS_NAME: ${{ secrets.SHINYAPPS_NAME }}

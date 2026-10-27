@@ -58,6 +58,11 @@ jobs:
             scales
             cpp11
 
+      # 把 pak 用 any:: 安裝的套件標記改回 standard，否則部署時這些套件沒有下載網址
+      # (說明見 ci_normalize_packages.R；有些套件裝在系統目錄，所以用 sudo，-E 保留 R 的路徑設定)
+      - name: 修正套件來源標記 (any → standard)
+        run: sudo -E env "PATH=$PATH" Rscript ci_normalize_packages.R
+
       # 從「指定的那次執行」取出 artifact
       - uses: actions/download-artifact@v4
         with:

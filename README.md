@@ -83,6 +83,11 @@ source("deploy_app.R")            # 部署到 shinyapps.io（需先設定帳號�
 
 估價結果僅供參考，不構成任何買賣或投資建議。
 
+## 授權
+
+- **程式碼**：[MIT License](LICENSE) © 2026 Renture。可以自由使用、修改、散布（包含商業用途），只要保留著作權聲明與授權條款。
+- **資料**：程式碼的授權不包含資料。內政部實價登錄資料依「政府資料開放授權條款」、OpenStreetMap 資料依 ODbL 授權，使用時請依各自條款標示來源。
+
 ## 技術
 
 R · PostgreSQL · SQL · sf (GIS) · XGBoost · ranger · Shiny · bslib · Leaflet · Plotly · Claude API · GitHub Actions

@@ -53,30 +53,30 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev
       # 只裝「部署」要用的套件 (App 本身 + rsconnect)
       # cpp11：tidyr 等套件編譯時需要，rsconnect 盤點套件版本時會檢查
+      # ⚠️ 套件名稱不要加 any:: 前綴：any:: 安裝的套件會被記成 Source=any，
+      #    rsconnect 不會替它換上下載網址 → shinyapps.io 安裝失敗 (Unsupported url scheme: RSPM/...)
       # ⚠️ 註解不能寫在 packages: | 的區塊裡：多行文字區塊中的 # 會被當成套件名稱的一部分
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           packages: |
-            any::rsconnect
-            any::shiny
-            any::bslib
-            any::leaflet
-            any::plotly
-            any::cachem
-            any::dplyr
-            any::sf
-            any::xgboost
-            any::RANN
-            any::scales
-            any::cpp11
+            rsconnect
+            shiny
+            bslib
+            leaflet
+            plotly
+            cachem
+            dplyr
+            sf
+            xgboost
+            RANN
+            scales
+            cpp11
       - name: 事前檢查 (金鑰、App 套件)
         env:
           SHINYAPPS_NAME: ${{ secrets.SHINYAPPS_NAME }}
           SHINYAPPS_TOKEN: ${{ secrets.SHINYAPPS_TOKEN }}
           SHINYAPPS_SECRET: ${{ secrets.SHINYAPPS_SECRET }}
-        run: |
-          Rscript -e 'rsconnect::setAccountInfo(Sys.getenv("SHINYAPPS_NAME"), Sys.getenv("SHINYAPPS_TOKEN"), Sys.getenv("SHINYAPPS_SECRET")); cat("✓ shinyapps.io 金鑰有效\n")'
-          Rscript -e 'd <- rsconnect::appDependencies("app", appFiles = c("app.R", "shared_features.R")); cat("✓ App 需要的", nrow(d), "個套件都已安裝\n")'
+        run: Rscript ci_preflight.R     # 金鑰、套件安裝、套件下載網址 (說明見 ci_preflight.R)
 
   # ---------------------------------------------------------------------------
   # ② 建置：資料管線 + 模型
@@ -114,16 +114,16 @@ jobs:
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           packages: |
-            any::tidyverse
-            any::DBI
-            any::RPostgres
-            any::httr
-            any::sf
-            any::ranger
-            any::xgboost
-            any::scales
-            any::RANN
-            any::data.table
+            tidyverse
+            DBI
+            RPostgres
+            httr
+            sf
+            ranger
+            xgboost
+            scales
+            RANN
+            data.table
 
       # 快取：下載過的季資料 ZIP 和 OSM 圖資，下次直接用，不用每週重抓 1GB (也對政府伺服器比較禮貌)
       # 拆成「讀取 (restore)」和「存檔 (save)」兩步：
@@ -185,18 +185,18 @@ jobs:
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           packages: |
-            any::rsconnect
-            any::shiny
-            any::bslib
-            any::leaflet
-            any::plotly
-            any::cachem
-            any::dplyr
-            any::sf
-            any::xgboost
-            any::RANN
-            any::scales
-            any::cpp11
+            rsconnect
+            shiny
+            bslib
+            leaflet
+            plotly
+            cachem
+            dplyr
+            sf
+            xgboost
+            RANN
+            scales
+            cpp11
 
       # 取出建置工作打包的產物，放回 app/ 底下 (app/data、app/models)
       - uses: actions/download-artifact@v4

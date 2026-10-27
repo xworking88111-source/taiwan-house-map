@@ -45,18 +45,18 @@ jobs:
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           packages: |
-            any::rsconnect
-            any::shiny
-            any::bslib
-            any::leaflet
-            any::plotly
-            any::cachem
-            any::dplyr
-            any::sf
-            any::xgboost
-            any::RANN
-            any::scales
-            any::cpp11
+            rsconnect
+            shiny
+            bslib
+            leaflet
+            plotly
+            cachem
+            dplyr
+            sf
+            xgboost
+            RANN
+            scales
+            cpp11
 
       # 從「指定的那次執行」取出 artifact
       - uses: actions/download-artifact@v4

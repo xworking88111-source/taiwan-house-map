@@ -1,0 +1,75 @@
+# ==============================================================================
+# 只部署 (不重新建置)：拿某一次建置產出的 artifact，直接部署到 shinyapps.io
+#
+# 什麼時候用？
+#   - 每週更新的「部署」失敗，但「建置」成功了，而你已經修好了部署程式 (deploy_app.R)
+#     → 注意：在 GitHub 上「Re-run failed jobs」會用「當時」的程式碼，不會包含新的修正；
+#       用這個流程才會用「最新版」的 deploy_app.R
+#   - 想把 App 重新部署一次，但不想等 30 分鐘重新建置
+#
+# 怎麼用？ (artifact 保存 7 天)
+#   1. 找到建置成功的那次執行編號 (網址最後那串數字，例如 .../actions/runs/40478017909)
+#   2. 終端機執行：
+#        gh workflow run deploy-only -f run_id=40478017909
+#      或在 GitHub 網頁：Actions → deploy-only → Run workflow → 填入 run_id
+# ==============================================================================
+name: deploy-only
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "要部署哪一次建置的產物 (執行編號)"
+        required: true
+
+# 讀取其他執行的 artifact 需要 actions:read 權限
+permissions:
+  actions: read
+  contents: read
+
+env:
+  RE_PROJECT_PATH: ${{ github.workspace }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: 安裝系統函式庫 (sf 需要的 GIS 工具)
+        run: sudo apt-get update && sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev
+      # 和 weekly-update.yml 的 deploy 工作相同：部署時 rsconnect 會盤點 App 用到的套件版本
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::rsconnect
+            any::shiny
+            any::bslib
+            any::leaflet
+            any::plotly
+            any::cachem
+            any::dplyr
+            any::sf
+            any::xgboost
+            any::RANN
+            any::scales
+            any::cpp11
+
+      # 從「指定的那次執行」取出 artifact
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+          path: app
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 部署到 shinyapps.io
+        env:
+          SHINYAPPS_NAME: ${{ secrets.SHINYAPPS_NAME }}
+          SHINYAPPS_TOKEN: ${{ secrets.SHINYAPPS_TOKEN }}
+          SHINYAPPS_SECRET: ${{ secrets.SHINYAPPS_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: Rscript deploy_app.R

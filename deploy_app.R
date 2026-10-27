@@ -33,15 +33,32 @@ if (nzchar(Sys.getenv("ANTHROPIC_API_KEY"))) {
   writeLines(paste0("ANTHROPIC_API_KEY=", Sys.getenv("ANTHROPIC_API_KEY")), renv_file)
 }
 
-rsconnect::deployApp(
-  appDir = "app",
-  appName = Sys.getenv("SHINYAPPS_APP_NAME", "taiwan-house-map"),
-  appFiles = c("app.R", "shared_features.R",
-               list.files("app/data", pattern = "^trades_.*\\.rds$", full.names = FALSE) |> (\(f) file.path("data", f))(),
+# 套件來源的網址：rsconnect 會告訴 shinyapps.io「每個套件從哪裡下載」。
+# GitHub Actions 是從名為「RSPM」的套件庫安裝套件的，如果沒告訴 rsconnect RSPM 的網址，
+# 清單裡只會寫「RSPM」這個名字 → shinyapps.io 不知道去哪裡下載 → 安裝失敗
+# (錯誤訊息：Unsupported url scheme: RSPM/src/contrib/RANN_2.6.3.tar.gz)
+repos <- getOption("repos")
+repos["RSPM"] <- "https://packagemanager.posit.co/cran/latest"
+if (is.na(repos["CRAN"]) || repos["CRAN"] == "@CRAN@") repos["CRAN"] <- "https://cloud.r-project.org"
+options(repos = repos)
+
+# 部署清單 (路徑相對於 app/)
+app_files <- c("app.R", "shared_features.R",
+               file.path("data", list.files("app/data", pattern = "^trades_.*\\.rds$")),
                "data/meta.rds", "data/condition_adjust.rds", "data/towns.rds", "data/road_lookup.rds",
                "data/facilities.rds", "data/nbr_table.rds",            # v2：空間特徵
                "models/price_model.rds", "models/xgb_point.ubj", "models/xgb_quant.ubj",
-               if (file.exists(renv_file)) ".Renviron"),
+               if (file.exists(renv_file)) ".Renviron")
+# 部署前檢查：deployApp() 遇到缺檔只會「警告」、照樣部署 → App 上線後一打開就當掉。
+# 所以少任何一個檔案就直接停止，讓問題在部署前就被發現
+missing <- app_files[!file.exists(file.path("app", app_files))]
+if (length(missing) > 0) stop("部署中止，缺少檔案：", paste(missing, collapse = "、"))
+if (sum(grepl("^data/trades_", app_files)) != 5) stop("部署中止：交易資料應該有 5 個類別的檔案")
+
+rsconnect::deployApp(
+  appDir = "app",
+  appName = Sys.getenv("SHINYAPPS_APP_NAME", "taiwan-house-map"),
+  appFiles = app_files,
   forceUpdate = TRUE,          # 不要跳出「確定要覆蓋嗎？」的詢問 (自動化時沒有人可以按)
   launch.browser = FALSE
 )

@@ -57,7 +57,10 @@ jobs:
       - name: 安裝系統函式庫 (sf 需要的 GIS 工具)
         run: sudo apt-get update && sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev
 
-      - uses: r-lib/actions/setup-r-dependencies@v2   # 安裝 R 套件，並自動快取
+      # 安裝 R 套件，並自動快取。
+      # cpp11：tidyr 等套件編譯時需要，rsconnect 部署前盤點套件版本時會檢查。
+      # ⚠️ 註解不能寫在下面 packages: | 的區塊裡：多行文字區塊中的 # 會被當成套件名稱的一部分
+      - uses: r-lib/actions/setup-r-dependencies@v2
         with:
           packages: |
             any::tidyverse
@@ -76,7 +79,18 @@ jobs:
             any::leaflet
             any::plotly
             any::cachem
-            any::cpp11       # tidyr 等套件編譯時需要；rsconnect 盤點套件版本時會檢查
+            any::cpp11
+
+      # 事前檢查 (fail fast)：在花 20 分鐘跑 ETL、訓練之前，先確認「部署」會用到的東西都沒問題。
+      # 之前的失敗 (金鑰作廢、缺少 cpp11) 都要跑到最後一步才發現；放在這裡 1 分鐘內就會失敗
+      - name: 事前檢查 (金鑰、App 套件)
+        env:
+          SHINYAPPS_NAME: ${{ secrets.SHINYAPPS_NAME }}
+          SHINYAPPS_TOKEN: ${{ secrets.SHINYAPPS_TOKEN }}
+          SHINYAPPS_SECRET: ${{ secrets.SHINYAPPS_SECRET }}
+        run: |
+          Rscript -e 'rsconnect::setAccountInfo(Sys.getenv("SHINYAPPS_NAME"), Sys.getenv("SHINYAPPS_TOKEN"), Sys.getenv("SHINYAPPS_SECRET")); cat("✓ shinyapps.io 金鑰有效\n")'
+          Rscript -e 'd <- rsconnect::appDependencies("app", appFiles = c("app.R", "shared_features.R")); cat("✓ App 需要的", nrow(d), "個套件都已安裝\n")'
 
       # 快取：下載過的季資料 ZIP 和 OSM 圖資，下次直接用，不用每週重抓 1GB (也對政府伺服器比較禮貌)
       - uses: actions/cache@v4

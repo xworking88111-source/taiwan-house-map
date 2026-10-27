@@ -37,6 +37,12 @@ if (nzchar(Sys.getenv("ANTHROPIC_API_KEY"))) {
 # GitHub Actions 是從名為「RSPM」的套件庫安裝套件的，如果沒告訴 rsconnect RSPM 的網址，
 # 清單裡只會寫「RSPM」這個名字 → shinyapps.io 不知道去哪裡下載 → 安裝失敗
 # (錯誤訊息：Unsupported url scheme: RSPM/src/contrib/RANN_2.6.3.tar.gz)
+#
+# ⚠️ 只設定 options(repos) 不夠：rsconnect 用的是 renv「盤點」時記下的套件庫清單，
+#    而 GitHub Actions 的 setup-r 會設定環境變數 RENV_CONFIG_REPOS_OVERRIDE，
+#    「強制覆蓋」renv 的清單 → 清單裡沒有 RSPM 這個名稱 → 還是沒有網址。
+#    所以要先把這個覆蓋拿掉 (本機沒有這個變數，不受影響)。
+Sys.unsetenv("RENV_CONFIG_REPOS_OVERRIDE")
 repos <- getOption("repos")
 repos["RSPM"] <- "https://packagemanager.posit.co/cran/latest"
 if (is.na(repos["CRAN"]) || repos["CRAN"] == "@CRAN@") repos["CRAN"] <- "https://cloud.r-project.org"
@@ -54,6 +60,21 @@ app_files <- c("app.R", "shared_features.R",
 missing <- app_files[!file.exists(file.path("app", app_files))]
 if (length(missing) > 0) stop("部署中止，缺少檔案：", paste(missing, collapse = "、"))
 if (sum(grepl("^data/trades_", app_files)) != 5) stop("部署中止：交易資料應該有 5 個類別的檔案")
+
+# 部署前驗證套件來源：先產生 shinyapps.io 要看的套件清單 (manifest.json)，
+# 確認「每個套件都有完整的下載網址」。沒有網址的套件，shinyapps.io 會在建置時失敗
+# (而且要等上傳、排隊好幾分鐘才會看到錯誤) → 在這裡先擋下，並列出是哪些套件
+rsconnect::writeManifest(appDir = "app", appFiles = app_files, quiet = TRUE)
+manifest <- jsonlite::read_json("app/manifest.json")
+unlink("app/manifest.json")                      # 只是用來檢查，deployApp 會自己重新產生
+no_url <- Filter(function(p) is.null(p$Repository) || !grepl("^https?://", p$Repository), manifest$packages)
+if (length(no_url) > 0) {
+  stop("部署中止：這些套件沒有可下載的網址 → ",
+       paste(sprintf("%s (Source=%s, Repository=%s)", names(no_url),
+                     sapply(no_url, function(p) p$Source %||% "NA"),
+                     sapply(no_url, function(p) p$Repository %||% "NA")), collapse = "、"))
+}
+message("✓ ", length(manifest$packages), " 個套件都有下載網址")
 
 rsconnect::deployApp(
   appDir = "app",

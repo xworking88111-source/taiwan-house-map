@@ -53,6 +53,7 @@ app_files <- c("app.R", "shared_features.R",
                file.path("data", list.files("app/data", pattern = "^trades_.*\\.rds$")),
                "data/meta.rds", "data/condition_adjust.rds", "data/towns.rds", "data/road_lookup.rds",
                "data/facilities.rds", "data/nbr_table.rds",            # v2：空間特徵
+               "data/road_class.rds",                                  # v3：臨路等級
                "models/price_model.rds", "models/xgb_point.ubj", "models/xgb_quant.ubj",
                if (file.exists(renv_file)) ".Renviron")
 # 部署前檢查：deployApp() 遇到缺檔只會「警告」、照樣部署 → App 上線後一打開就當掉。

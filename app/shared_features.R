@@ -52,3 +52,36 @@ lookup_nbr <- function(tbl, x, y, type, min_n = 3) {
              nbr_lp_all = if (sum(all$n) >= min_n) sum(all$s) / sum(all$n) else NA)
 }
 
+
+# --- 臨路等級 (實驗 03 驗證有效：MAPE 12.2% → 12.0%，透天 18.2% → 17.6%) -------------------
+# 訓練 (new_model_training.R) 和 App 估價都呼叫 road_features()，保證算法一模一樣 (避免 training-serving skew)
+# rt = build_road_tables() 產生的兩張表 (見 new_features.R)：
+#   rt$cls   ：「路名 + 2 公里方格」→ 這條路在附近 3 公里內的最高 OSM 等級
+#   rt$major ：主要道路 (OSM trunk/primary/secondary) 每 50 公尺一個點的 TWD97 座標
+road_rank <- c(trunk = 5, primary = 5, secondary = 4, tertiary = 3, residential = 2,
+               unclassified = 2, living_street = 2, service = 1, motorway = 0)
+road_grid <- 2000
+
+# 路名：抓第一個「…路 / …街 / …大道」。base R 的 regmatches：找不到時回傳 NA
+road_name <- function(x) {
+  out <- rep(NA_character_, length(x))
+  m <- regexpr("^.+?(大道|路|街)", x, perl = TRUE)
+  out[m > 0] <- regmatches(x, m)
+  out
+}
+
+# rest：地址去掉「縣市 + 鄉鎮市區」之後的部分 (例：康樂街136巷15弄32號十一樓之4)
+# xy  ：n × 2 的 TWD97 公尺座標
+road_features <- function(rest, xy, rt) {
+  rest <- sub("^[^0-9路街道巷弄段]{1,4}[村里](?=\\d+鄰|[^0-9]+(路|街|大道|巷))", "", rest, perl = TRUE)  # 去掉村里
+  rest <- sub("^\\d+鄰", "", rest)
+  road <- road_name(rest)
+  key  <- paste(road, floor(xy[, 1] / road_grid), floor(xy[, 2] / road_grid))
+  data.frame(
+    lane_depth   = ifelse(grepl("\\d+弄", rest), 2L, ifelse(grepl("\\d+巷", rest), 1L, 0L)),   # 0 臨路 / 1 巷 / 2 弄
+    road_type    = ifelse(is.na(road), 0L, ifelse(grepl("大道$", road), 3L,
+                          ifelse(grepl("路$", road), 2L, ifelse(grepl("街$", road), 1L, 0L)))),
+    road_class   = ifelse(is.na(road), NA_real_, rt$cls$rank[match(key, rt$cls$key)]),
+    d_major_road = round(RANN::nn2(rt$major, xy, k = 1)$nn.dists[, 1])
+  )
+}

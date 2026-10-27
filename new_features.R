@@ -155,6 +155,41 @@ build_nbr_table <- function(x, y, type, month, logp, ref_month) {
         dt[, .(s = sum(lp), n = .N, type = "ALL"), by = .(cx, cy)])
 }
 # --- 4. 主程式：建立設施檔 + 增量計算每個地址的設施特徵 ----------------------------
+# --- 同棟歷史成交 (實驗 02 驗證有效：MAPE 12.5% → 12.2%) -------------------------
+# 每筆交易：同門牌 (addr_key，不含樓層) 在它之前 window 個月內的成交 → 平均 log 單價、筆數、平均距今月數
+# 防洩漏：只看更早的月份；cap_month 以後的成交一律看不到 (測試期 = 站在 cap_month+1 往回看)
+building_history <- function(addr_key, month, logp, cap_month = Inf, window = 36) {
+  hist <- data.table(k = addr_key, hm = month, lp = logp)[hm <= cap_month]
+  q <- data.table(k = addr_key, m = pmin(month, cap_month + 1))   # 測試期：等同站在 cut_month+1 往回看
+  q[, `:=`(lo = m - window, hi = m - 1)]
+  res <- hist[q, on = .(k, hm >= lo, hm <= hi),
+              .(bld_lp = mean(lp), bld_n = sum(!is.na(lp)), bld_dt = mean(i.m - hm)), by = .EACHI]
+  res[bld_n == 0, `:=`(bld_lp = NA_real_, bld_dt = NA_real_)]
+  as_tibble(res[, .(bld_lp, bld_n, bld_dt)])
+}
+
+# --- 臨路等級用的道路表 (App 估價也要用 → 匯出到 app/data/road_class.rds) ---------------------
+# 1. 主要道路：路線每 50 公尺切一個點 → 估價時用 k-d tree 找最近點 = 到主要道路的距離 (誤差 < 25 公尺)
+# 2. 道路等級：OSM 路段名稱 (忠孝東路四段) 只留到「路/街/大道」→ 忠孝東路，
+#    按「路名 + 2 公里方格」取最高等級，再複製到周圍 9 格 → 查詢時一次 match() 就等於查 3 公里內
+#    為什麼要限定附近？全台有幾百條「中山路」，等級各不相同
+build_road_tables <- function() {
+  roads <- st_read(file.path(project_path, "geo_data", "gis_osm_roads_free_1.shp"), quiet = TRUE,
+                   query = paste0("SELECT name, fclass FROM gis_osm_roads_free_1 WHERE fclass IN (",
+                                  paste0("'", names(road_rank), "'", collapse = ","), ")")) %>%
+    st_transform(3826)
+  major <- roads %>% filter(fclass %in% c("trunk", "primary", "secondary")) %>%
+    st_segmentize(dfMaxLength = 50) %>% st_coordinates()
+  xy  <- st_coordinates(suppressWarnings(st_point_on_surface(roads)))
+  osm <- data.table(road = road_name(coalesce(roads$name, "")), rank = road_rank[roads$fclass],
+                    gx = floor(xy[, 1] / road_grid), gy = floor(xy[, 2] / road_grid))[!is.na(road)]
+  osm <- osm[, .(rank = max(rank)), by = .(road, gx, gy)]
+  cls <- rbindlist(lapply(0:8, function(i) osm[, .(road, gx = gx + i %/% 3 - 1, gy = gy + i %% 3 - 1, rank)]))
+  cls <- cls[, .(rank = max(rank)), by = .(road, gx, gy)]
+  list(cls = data.frame(key = paste(cls$road, cls$gx, cls$gy), rank = cls$rank),
+       major = unname(round(major[, 1:2])))           # 座標取整數公尺，檔案小一半
+}
+
 if (!isTRUE(getOption("features.as_library"))) {   # 被其他程式當成函式庫載入時不執行主程式
   fac_file <- file.path(geo_dir, "facilities.rds")
   fac <- build_facilities()

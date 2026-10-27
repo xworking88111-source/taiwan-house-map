@@ -196,12 +196,13 @@ saveRDS(m, "app/models/price_model.rds")                         # 只剩特徵�
 # 空間特徵：設施座標 (估價時算距離) + 附近行情表 (估價時查附近 9 格)
 file.copy("models/nbr_table.rds", "app/data/nbr_table.rds", overwrite = TRUE)
 file.copy("geo_data/facilities.rds", "app/data/facilities.rds", overwrite = TRUE)
+file.copy("models/road_class.rds", "app/data/road_class.rds", overwrite = TRUE)    # 臨路等級 (v3)
 
 # 最後檢查：App 需要的檔案一個都不能少。
 # file.copy() 在來源檔不存在時「不會報錯」(只回傳 FALSE)，如果不檢查，流程會顯示成功、
 # 但線上 App 一打開就當掉 → 比失敗更糟。所以少任何一個檔案就直接停止。
 required <- c(paste0("app/data/", c("meta.rds", "towns.rds", "road_lookup.rds", "facilities.rds",
-                                    "nbr_table.rds", "condition_adjust.rds")),
+                                    "nbr_table.rds", "condition_adjust.rds", "road_class.rds")),
               paste0("app/models/", c("price_model.rds", "xgb_point.ubj", "xgb_quant.ubj")),
               file.path("app/data", paste0("trades_", c("成屋", "預售屋", "預售交屋", "土地", "車位"), ".rds")))
 missing <- required[!file.exists(required)]

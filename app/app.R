@@ -42,6 +42,7 @@ model  <- readRDS("models/price_model.rds")
 source("shared_features.R")
 facilities <- readRDS("data/facilities.rds")
 nbr_tbl    <- readRDS("data/nbr_table.rds")
+road_tbl   <- readRDS("data/road_class.rds")   # 臨路等級：道路等級表 + 主要道路座標 (v3 模型新增，見 shared_features.R)
 # 屋況 / 產權條件的影響：由 new_condition_adjust.R 用實價登錄「備註」+ 交叉預測量出來的
 cond_tbl   <- if (file.exists("data/condition_adjust.rds")) readRDS("data/condition_adjust.rds") else NULL
 xgb_point <- xgb.load("models/xgb_point.ubj")   # 點估計模型
@@ -135,7 +136,7 @@ build_model_input <- function(inp) {
     lng = inp$lng, lat = inp$lat
   )
   # 空間特徵：到各類設施的距離、附近行情 (和訓練時用同一個函數算，見 shared_features.R)
-  d <- cbind(d, inp$geo, inp$nbr)
+  d <- cbind(d, inp$geo, inp$nbr, inp$bld, inp$road_feat)
   for (col in names(model$factor_levels)) {
     d[[col]] <- as.integer(factor(d[[col]], levels = model$factor_levels[[col]]))
   }
@@ -150,6 +151,18 @@ predict_price <- function(inp) {
   cq <- model$conformal_q %||% 0                  # 保形校正加寬量 (訓練時算好的，見 new_model_training.R)
   list(point = exp(predict(xgb_point, x)),        # exp() 把 log 轉回 元/坪
        p10 = exp(q[1] - cq), p50 = exp(q[2]), p90 = exp(q[3] + cq))
+}
+
+# 同棟歷史成交特徵 (和訓練時 new_features.R 的 building_history() 同定義)：
+#   這棟建物在「最新月份之前 36 個月」內的成屋成交 → 平均 log 單價、筆數、平均距今月數
+#   估價月份 = 資料最新月份 (t_month_idx_max)，時間窗 = [最新 - 36, 最新 - 1]，和訓練時的測試期設定一致
+building_features <- function(h, ref_month = model$t_month_idx_max, window = 36) {
+  none <- data.frame(bld_lp = NA_real_, bld_n = 0L, bld_dt = NA_real_)
+  if (is.null(h) || nrow(h) == 0) return(none)
+  m <- (as.integer(format(h$trans_ym, "%Y")) - 2020) * 12 + as.integer(format(h$trans_ym, "%m"))
+  ok <- h$category == "成屋" & !is.na(h$unit_wan) & h$unit_wan > 0 & m >= ref_month - window & m <= ref_month - 1
+  if (!any(ok)) return(none)
+  data.frame(bld_lp = mean(log(h$unit_wan[ok] * 1e4)), bld_n = sum(ok), bld_dt = mean(ref_month - m[ok]))
 }
 
 # 找「相似成交」：同區、同型態、屋齡 ±8 年、坪數 ±40%，依距離排序取最近 10 筆
@@ -191,7 +204,8 @@ cn_digit <- c("1" = "一", "2" = "二", "3" = "三", "4" = "四", "5" = "五", "
 first_match <- function(pattern, x) { m <- regmatches(x, regexpr(pattern, x, perl = TRUE)); if (length(m)) m else NA }
 locate_address <- function(city, district, text) {
   dd <- roads$districts[roads$districts$city == city & roads$districts$district == district, ]
-  out <- list(lng = dd$lng[1], lat = dd$lat[1], level = "行政區中心", label = paste0(city, district), history = NULL)
+  out <- list(lng = dd$lng[1], lat = dd$lat[1], level = "行政區中心", label = paste0(city, district), history = NULL,
+              rest = "")   # rest = 去掉縣市區之後的地址 (算臨路等級用)
   if (is.null(text) || !nzchar(trimws(text))) return(out)
   a <- chartr("０１２３４５６７８９－", "0123456789-", text)
   a <- gsub("台", "臺", gsub("巿", "市", gsub("\\s", "", a)))
@@ -200,6 +214,7 @@ locate_address <- function(city, district, text) {
   a <- sub("^\\d+鄰", "", a)
   # 「4段」→「四段」(OSM 路名和實價登錄都用國字)
   for (k in names(cn_digit)) a <- gsub(paste0(k, "段"), paste0(cn_digit[k], "段"), a, fixed = TRUE)
+  out$rest <- a
   bld <- sub("(號).*$", "\\1", a)                         # 去掉樓層：「100號三樓」→「100號」
   # (2) 同一棟建物的歷史成交
   if (grepl("號$", bld)) {
@@ -209,7 +224,7 @@ locate_address <- function(city, district, text) {
                trades_by_cat[["預售交屋"]][trades_by_cat[["預售交屋"]]$address %in% key, ])
     if (nrow(h) > 0) {
       h <- h[order(h$trans_ym, decreasing = TRUE), ]
-      return(list(lng = h$lng[1], lat = h$lat[1], level = "這棟建物 (資料庫有成交紀錄)", label = bld, history = h))
+      return(list(lng = h$lng[1], lat = h$lat[1], level = "這棟建物 (資料庫有成交紀錄)", label = bld, history = h, rest = a))
     }
   }
   # (3) 巷弄 / 路段
@@ -221,7 +236,7 @@ locate_address <- function(city, district, text) {
   for (j in seq_along(cands)) {
     if (is.na(cands[j])) next
     hit <- rr[rr$name == cands[j], ]
-    if (nrow(hit) > 0) return(list(lng = hit$lng[1], lat = hit$lat[1], level = lv[j], label = cands[j], history = NULL))
+    if (nrow(hit) > 0) return(list(lng = hit$lng[1], lat = hit$lat[1], level = lv[j], label = cands[j], history = NULL, rest = a))
   }
   out$level <- "行政區中心 (找不到這個地址，請確認行政區是否正確)"
   out
@@ -917,6 +932,9 @@ server <- function(input, output, session) {
     xy <- lnglat_to_xy(inp$lng, inp$lat)
     inp$geo <- facility_features(xy, facilities)                    # 21 個設施距離 / 數量
     inp$nbr <- lookup_nbr(nbr_tbl, xy[1], xy[2], inp$type)           # 附近約 500 公尺、近 12 個月的同型態行情
+    inp$bld <- building_features(loc$history)                       # 同棟過去 36 個月的成交
+    # ⚠️ 不能叫 inp$road：inp$road 已經是「使用者輸入的地址文字」(AI 提示詞會用到)，同名會互相覆蓋
+    inp$road_feat <- road_features(loc$rest, xy, road_tbl)          # 巷弄深度、道路等級、到主要道路距離
     pred  <- predict_price(inp)
     comps <- find_comparables(inp)
     list(inp = inp, pred = pred, comps = comps, loc = loc)

@@ -148,6 +148,10 @@ jobs:
         run: Rscript new_geocode.R
       - name: 空間特徵 (設施距離)
         run: Rscript new_features.R
+      - name: 訓練模型 (含跳動檢查：和上週模型差太多就停止，不部署)
+        run: Rscript new_model_training.R
+      # 存快取放在「訓練之後」：geo_data/drift_ref.rds (跳動檢查的參考答案) 才會留到下週
+      # if: always()：前面任何一步失敗也照樣存 → 下載過的資料不會白費
       - uses: actions/cache/save@v4
         if: always()
         with:
@@ -155,8 +159,6 @@ jobs:
             raw_history_zips
             geo_data
           key: re-data-${{ github.run_id }}
-      - name: 訓練模型
-        run: Rscript new_model_training.R
       - name: 屋況與產權調整 (從備註量化影響)
         run: Rscript new_condition_adjust.R
       - name: 匯出 App 資料

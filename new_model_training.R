@@ -37,7 +37,7 @@ load_training_data <- function(schema = "re_v2") {
   fac_sql <- paste0("gf.d_", dist_cols, collapse = ", ")
   cnt_sql <- paste0("gf.n_", count_cols, "_500", collapse = ", ")
   dbGetQuery(con, paste0("
-    SELECT f.city, f.district, f.b_category, f.trans_ym,
+    SELECT f.addr_key, f.address_norm, f.city, f.district, f.b_category, f.trans_ym,
            f.house_age_at_trans, f.pure_house_ping, f.land_ping, f.main_ping,
            f.floor_num, f.total_floors_num, f.rooms, f.halls, f.baths,
            f.has_elevator, f.has_management, f.include_parking, f.parking_price_unknown,
@@ -50,7 +50,10 @@ load_training_data <- function(schema = "re_v2") {
     JOIN geo_features gf ON f.addr_key = gf.addr_key   -- 設施距離 (特徵庫，見 new_features.R)
     WHERE f.b_category IN ('透天厝', '電梯大樓', '華廈', '公寓', '套房')
       AND f.house_age_at_trans IS NOT NULL
-      AND g.geo_level <> 'none';")) %>% as_tibble()
+      AND g.geo_level <> 'none'
+    -- 固定排序：SQL 沒寫 ORDER BY 時，資料庫回傳的順序「不保證」每次一樣。
+    -- 順序一變，XGBoost 隨機抽樣抽到的就是不同的房子 → 就算固定種子，模型也不一樣 (估價跳動的隱藏原因)
+    ORDER BY f.season, f.serial_number;")) %>% as_tibble()
 }
 if (!exists("df_raw")) df_raw <- load_training_data()
 message("讀入 ", nrow(df_raw), " 筆")
@@ -106,6 +109,17 @@ cut_month <- max(df$t_month_idx) - 6                     # 最近 6 個月當測
 df <- bind_cols(df %>% select(-any_of(c("nbr_lp", "nbr_n", "nbr_lp_all"))),
                 neighbor_price(df$tx, df$ty, as.character(df$b_category), df$t_month_idx, df$y, cap_month = cut_month))
 message("附近行情：", scales::percent(mean(!is.na(df$nbr_lp)), 0.1), " 的交易附近有足夠的同型態成交")
+
+# 同棟歷史成交 (v3 新特徵，實驗 02)：同門牌過去 36 個月的成交行情。定義見 new_features.R 的 building_history()
+df <- bind_cols(df %>% select(-any_of(c("bld_lp", "bld_n", "bld_dt"))),
+                building_history(df$addr_key, df$t_month_idx, df$y, cap_month = cut_month))
+# 臨路等級 (v3 新特徵，實驗 03)：巷弄深度、路名尾字、道路等級、到主要道路距離。定義見 app/shared_features.R
+road_tbl <- build_road_tables()
+df <- bind_cols(df %>% select(-any_of(c("lane_depth", "road_type", "road_class", "d_major_road"))),
+                road_features(str_remove(str_remove(df$address_norm, fixed(df$city)), fixed(df$district)),
+                              cbind(df$tx, df$ty), road_tbl))
+message("同棟歷史：", scales::percent(mean(df$bld_n > 0), 0.1), " 有同棟紀錄；道路等級對到 ",
+        scales::percent(mean(!is.na(df$road_class)), 0.1))
 train <- df %>% filter(t_month_idx <= cut_month)
 test  <- df %>% filter(t_month_idx >  cut_month)
 message("訓練集 ", nrow(train), " 筆 / 測試集 ", nrow(test), " 筆")
@@ -158,7 +172,9 @@ features_v1 <- c("city", "district", "b_category", "house_age_at_trans", "pure_h
                  "t_month_idx", "lng", "lat")
 # v2 新增：附近行情 + 交通 (捷運、輕軌、台鐵、高鐵、機場、公車) + 嫌惡設施 + 生活機能
 features <- c(features_v1, "nbr_lp", "nbr_n", "nbr_lp_all",
-              paste0("d_", dist_cols), paste0("n_", count_cols, "_500"))
+              paste0("d_", dist_cols), paste0("n_", count_cols, "_500"),
+              # v3 新增 (誤差優化實驗，紀錄見 models/experiments.csv)：同棟歷史成交 + 臨路等級
+              "bld_lp", "bld_n", "bld_dt", "lane_depth", "road_type", "road_class", "d_major_road")
 
 # 類別欄位的「level 清單」要固定，訓練、測試、App 預測都用同一份。
 # ⚠️ 舊版這裡寫 as.factor()：測試集少了某些區時，levels 會變短，
@@ -205,7 +221,11 @@ xgb_params <- list(
   max_depth = 8,            # 每棵樹最多幾層：越深越能抓複雜關係，也越容易過擬合
   subsample = 0.8,          # 每棵樹只用 80% 資料
   colsample_bytree = 0.8,   # 每棵樹只用 80% 欄位
-  min_child_weight = 10
+  min_child_weight = 10,
+  # 固定 XGBoost 自己的亂數種子 (subsample / colsample 抽樣用)。
+  # 搭配 SQL 的 ORDER BY (資料順序固定)：同一份資料重訓 = 同一個模型，估價不會因為「運氣」跳動。
+  # 剩下的變動才是「新資料帶來的真實行情變化」(實驗 01 量過：沒固定時同一間房子可以差 13%)
+  seed = 42
 )
 xgb_fit <- xgb.train(
   params = xgb_params, data = dtrain, nrounds = 1500,
@@ -268,7 +288,26 @@ message("[XGBoost 分位數] P10~P90 區間實際涵蓋率：", scales::percent(
 results <- bind_rows(results, evaluate("4. XGBoost 分位數 (P50)", qx[, 2]))
 print(results %>% mutate(across(c(MAPE, hit_10, hit_20), \(x) scales::percent(x, accuracy = 0.1))))
 
-# --- 11. 存模型 + 示範預測 ----------------------------------------------------
+# --- 11. 跳動檢查 (模型監控 model monitoring) -----------------------------------
+# 每週自動重訓，萬一資料出問題 (例如政府檔案格式改了、某季資料缺一半)，模型可能突然變得很怪。
+# 上線前先拿「上一版模型估過的一批固定房子」，用新模型再估一次，比較差多少：
+#   差距中位數 <= 5%：正常的行情變化 → 繼續部署
+#   超過 5%        ：判定異常 → 這裡直接 stop()，GitHub Actions 的部署工作不會執行，網站繼續用上週的模型
+# 參考檔放在 geo_data/ (GitHub Actions 會快取這個資料夾，下週還拿得到)
+drift_file <- "geo_data/drift_ref.rds"
+drift_x <- to_matrix(test %>% slice_sample(n = min(5000, nrow(test))))
+if (file.exists(drift_file)) {
+  ref <- readRDS(drift_file)
+  if (identical(ref$features, features)) {
+    shift <- abs(exp(predict(xgb_fit, ref$x) - ref$pred) - 1)
+    message(sprintf("跳動檢查：和上一版模型比，估價差距中位數 %.1f%%、P90 %.1f%%",
+                    100 * median(shift), 100 * quantile(shift, .9)))
+    if (median(shift) > 0.05) stop("新模型和上一版差太多 (中位數 > 5%)，停止部署，請檢查資料")
+  } else message("跳動檢查：特徵清單改過 (新版模型)，這次略過")
+}
+saveRDS(list(features = features, x = drift_x, pred = predict(xgb_fit, drift_x), at = Sys.time()), drift_file)
+
+# --- 12. 存模型 + 示範預測 ----------------------------------------------------
 dir.create("models", showWarnings = FALSE)
 model_meta <- list(features = features,
                    factor_levels = fac_levels, t_month_idx_max = max(df$t_month_idx),
@@ -285,6 +324,7 @@ saveRDS(c(list(xgb_raw = xgb.save.raw(xgb_fit), xgbq_raw = xgb.save.raw(xgbq_fit
 nbr_table <- build_nbr_table(df$tx, df$ty, as.character(df$b_category), df$t_month_idx, df$y,
                              ref_month = max(df$t_month_idx))
 saveRDS(as.data.frame(nbr_table), "models/nbr_table.rds")
+saveRDS(road_tbl, "models/road_class.rds", compress = "xz")         # App 算臨路等級用 (見 shared_features.R)
 
 # 示範：「高雄市鳳山區 (五甲) 瑞隆東路附近、35 年透天、建物 82 坪、土地 30 坪、無車位」
 # 經緯度從 geo_data/road_lookup.rds 查「瑞隆東路」的代表點 → 和 App 用的是同一套方法
@@ -299,7 +339,10 @@ case <- tibble(city = "高雄市", district = "鳳山區", b_category = "透天�
 # 空間特徵：和 App 一樣，用 new_features.R 的函數算 (設施距離 + 附近行情)
 case_xy <- lnglat_to_xy(case$lng, case$lat)
 case <- bind_cols(case, facility_features(case_xy, readRDS("geo_data/facilities.rds")),
-                  lookup_nbr(nbr_table, case_xy[1], case_xy[2], "透天厝"))
+                  lookup_nbr(nbr_table, case_xy[1], case_xy[2], "透天厝"),
+                  # 示範案例只有路名、沒有門牌 → 沒有同棟歷史 (bld_n = 0)
+                  data.frame(bld_lp = NA_real_, bld_n = 0L, bld_dt = NA_real_),
+                  road_features("瑞隆東路", case_xy, road_tbl))
 case_x <- prep_x(case)   # prep_x 已經用固定的 fac_levels，編號一定和訓練時一致
 q_case <- exp(predict(rf_fit, case_x, type = "quantiles", quantiles = c(.1, .5, .9))$predictions)
 p_xgb  <- exp(predict(xgb_fit, case_x %>% mutate(across(where(is.factor), as.integer)) %>% as.matrix()))

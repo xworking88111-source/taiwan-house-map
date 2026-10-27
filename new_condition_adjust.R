@@ -61,7 +61,7 @@ df_raw <- dbGetQuery(con, paste0("
          f.has_elevator, f.has_management, f.include_parking, f.parking_price_unknown,
          f.pure_house_unit_price_ping, f.pure_house_total_price,
          g.lng, g.lat, g.geo_level, gf.x AS tx, gf.y AS ty, ", fac_sql, ", ", cnt_sql, ",
-         f.note, f.addr_key, f.is_special_deal
+         f.note, f.addr_key, f.address_norm, f.is_special_deal
   FROM f
   JOIN geo_cache g ON f.addr_key = g.addr_key
   JOIN geo_features gf ON f.addr_key = gf.addr_key
@@ -80,6 +80,10 @@ take <- function(name) {
 }
 for (nm in c("features_v1", "features", "fac_levels", "prep_x", "to_matrix", "xgb_params")) take(nm)
 df <- bind_cols(df, neighbor_price(df$tx, df$ty, as.character(df$b_category), df$t_month_idx, df$y))
+# v3 特徵 (同棟歷史 + 臨路等級)：features 清單是從訓練程式拿的，這裡必須算出同樣的欄位，否則 prep_x() 會找不到欄位
+df <- bind_cols(df, building_history(df$addr_key, df$t_month_idx, df$y),
+                road_features(str_remove(str_remove(df$address_norm, fixed(df$city)), fixed(df$district)),
+                              cbind(df$tx, df$ty), build_road_tables()))
 
 # --- 3. 備註關鍵字分組 ------------------------------------------------------------
 # 一筆交易可能同時屬於多組 (例如含裝潢 + 帶租約)，所以每組各自一個 TRUE/FALSE 欄位

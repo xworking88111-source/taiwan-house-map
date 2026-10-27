@@ -76,6 +76,7 @@ jobs:
             any::leaflet
             any::plotly
             any::cachem
+            any::cpp11       # tidyr 等套件編譯時需要；rsconnect 盤點套件版本時會檢查
 
       # 快取：下載過的季資料 ZIP 和 OSM 圖資，下次直接用，不用每週重抓 1GB (也對政府伺服器比較禮貌)
       - uses: actions/cache@v4
@@ -94,6 +95,8 @@ jobs:
         run: Rscript new_features.R
       - name: 訓練模型
         run: Rscript new_model_training.R
+      - name: 屋況與產權調整 (從備註量化影響)
+        run: Rscript new_condition_adjust.R
       - name: 匯出 App 資料
         run: Rscript new_export_app_data.R
       - name: 部署到 shinyapps.io

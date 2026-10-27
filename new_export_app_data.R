@@ -140,8 +140,18 @@ trades <- trades %>%
   mutate(address = coalesce(addr_key, address), year = as.integer(format(trans_ym, "%Y"))) %>%
   select(-id, -addr_key, -rooms, -halls, -baths, -elevator, -parking, -land_ping)   # App 用不到的欄位
 unlink(list.files("app/data", pattern = "^trades.*\\.rds$", full.names = TRUE))   # 刪掉舊的檔案
+#   5. 每個類別只留 App 用得到的欄位：
+#      土地、車位：只畫面量圖和統計圖，用不到經緯度、地址 (34 萬筆地號字串很占空間)、屋齡、樓層
+#      成屋、預售交屋：沒有建案名稱、解約
+cols_drop <- list(
+  "土地"     = c("lng", "lat", "geo_level", "address", "age", "floor_num", "total_floors_num", "build_case", "cancelled"),
+  "車位"     = c("lng", "lat", "geo_level", "address", "age", "floor_num", "total_floors_num", "build_case", "cancelled"),
+  "成屋"     = c("build_case", "cancelled"),
+  "預售交屋" = c("build_case", "cancelled"),
+  "預售屋"   = character(0))
 for (cc in unique(as.character(trades$category))) {
-  saveRDS(trades[trades$category == cc, ], file.path("app/data", paste0("trades_", cc, ".rds")), compress = "xz")
+  d <- trades[trades$category == cc, setdiff(names(trades), cols_drop[[cc]])]
+  saveRDS(d, file.path("app/data", paste0("trades_", cc, ".rds")), compress = "xz")
 }
 meta <- list(
   data_months   = range(trades$trans_ym),

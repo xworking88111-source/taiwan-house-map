@@ -26,6 +26,10 @@ library(xgboost)     # 載入訓練好的模型
 # 小提醒：R 後載入的套件會「蓋掉」同名函數 (masking)。例如 library(jsonlite) 會蓋掉 Shiny 的 validate()、
 # library(httr) 會蓋掉 plotly 的 config()。需要用到這類套件時，請用 jsonlite::toJSON() 這種寫法，不要整個載入。
 
+# bindCache 的共用快取：預設最多會長到 200MB。免費 shinyapps.io 只有 1GB 記憶體 → 限制在 64MB
+# (超過時自動丟掉最久沒用的結果，LRU 策略)
+shinyOptions(cache = cachem::cache_mem(max_size = 64 * 1024^2))
+
 # --- 1. 載入資料 (App 啟動時只做一次，所有使用者共用) --------------------------
 # 交易資料已經在 new_export_app_data.R 依類別切成 5 個檔 (省記憶體，見該檔說明)
 meta <- readRDS("data/meta.rds")
@@ -106,7 +110,9 @@ filter_trades <- function(category, city, district, type_sel, year_rng, age_rng 
   d <- d[d$year >= year_rng[1] & d$year <= year_rng[2], ]
   # 屋齡：滑桿在預設的「全部範圍」時，連屋齡不明的交易也保留 (第一版會把它們濾掉)
   # (⚠️ 之前預設值寫 c(0, 100)、判斷卻寫 c(0, 70) → 探勘頁永遠被當成「有篩屋齡」，土地、車位全被濾掉)
-  if (age_rng[1] > 0 || age_rng[2] < 70) d <- d[!is.na(d$age) & d$age >= age_rng[1] & d$age <= age_rng[2], ]
+  # 土地、車位的檔案沒有 age 欄位 (匯出時拿掉省記憶體) → 只對有屋齡的類別篩選
+  if ((age_rng[1] > 0 || age_rng[2] < 70) && "age" %in% names(d))
+    d <- d[!is.na(d$age) & d$age >= age_rng[1] & d$age <= age_rng[2], ]
   d
 }
 

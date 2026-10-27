@@ -199,14 +199,16 @@ dvalid <- xgb.DMatrix(to_matrix(train[valid_idx, ]),  label = train$y[valid_idx]
 
 xgb_params <- list(
   objective = "reg:squarederror",
-  eta = 0.05,               # 學習率：每棵樹只修正一點點，慢慢逼近 → 比較不會過度擬合
+  eta = 0.1,                # 學習率：每棵樹只修正一點點，慢慢逼近 → 比較不會過度擬合
+                            # (原本 0.05 + 3000 棵樹，模型在記憶體裡 126MB，免費主機只有 1GB；
+                            #  改 0.1 + 最多 1500 棵，大小約減半，準確度差異見學習筆記)
   max_depth = 8,            # 每棵樹最多幾層：越深越能抓複雜關係，也越容易過擬合
   subsample = 0.8,          # 每棵樹只用 80% 資料
   colsample_bytree = 0.8,   # 每棵樹只用 80% 欄位
   min_child_weight = 10
 )
 xgb_fit <- xgb.train(
-  params = xgb_params, data = dtrain, nrounds = 3000,
+  params = xgb_params, data = dtrain, nrounds = 1500,
   evals = list(train = dtrain, valid = dvalid),
   early_stopping_rounds = 100,   # 驗證集分數連續 100 輪沒進步就停 → 自動找到最佳樹數
   verbose = 0

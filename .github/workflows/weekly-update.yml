@@ -1,0 +1,100 @@
+# ==============================================================================
+# GitHub Actions：每週自動更新資料並重新部署 App
+#
+# GitHub Actions 是什麼？
+#   GitHub 免費提供的「雲端電腦」。你寫好步驟清單 (就是這個檔案)，
+#   它就會在指定時間開一台乾淨的 Ubuntu 主機，照順序執行，做完就關機。
+#   公開 (public) 的 repo 完全免費。
+#
+# 這個流程每週一早上做的事：
+#   1. 開一台 Ubuntu + 一個臨時的 PostgreSQL 資料庫
+#   2. 下載實價登錄 (有新的季資料就會抓到) → ETL → 地理編碼 → 訓練模型 → 匯出 App 資料
+#   3. 部署到 shinyapps.io
+#
+# 要先在 GitHub repo 設定 Secrets (Settings → Secrets and variables → Actions → New repository secret)：
+#   SHINYAPPS_NAME、SHINYAPPS_TOKEN、SHINYAPPS_SECRET、ANTHROPIC_API_KEY (選填)
+# Secrets 是加密保存的，log 裡也會自動遮蔽，不會外洩。
+# ==============================================================================
+name: weekly-data-update
+
+on:
+  schedule:
+    - cron: "0 19 * * 0"     # 每週日 19:00 UTC = 台灣時間週一 03:00 (cron 用的是 UTC 時間)
+  workflow_dispatch:          # 也可以在 GitHub 網頁上按按鈕手動執行 (測試用)
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    # 臨時的 PostgreSQL：只在這次執行期間存在，跑完就消失
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: runner
+          POSTGRES_PASSWORD: runner
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+
+    # 讓 config.R 讀到雲端主機的路徑與資料庫設定
+    env:
+      RE_PROJECT_PATH: ${{ github.workspace }}
+      PGHOST: localhost
+      PGUSER: runner
+      PGPASSWORD: runner
+      PGDATABASE: postgres
+
+    steps:
+      - uses: actions/checkout@v4          # 把 repo 的程式碼抓到雲端主機上
+
+      - uses: r-lib/actions/setup-r@v2     # 安裝 R
+        with:
+          use-public-rspm: true            # 使用預先編譯好的套件，安裝快很多
+
+      - name: 安裝系統函式庫 (sf 需要的 GIS 工具)
+        run: sudo apt-get update && sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev
+
+      - uses: r-lib/actions/setup-r-dependencies@v2   # 安裝 R 套件，並自動快取
+        with:
+          packages: |
+            any::tidyverse
+            any::DBI
+            any::RPostgres
+            any::httr
+            any::sf
+            any::ranger
+            any::xgboost
+            any::rsconnect
+            any::scales
+            any::RANN
+            any::data.table
+
+      # 快取：下載過的季資料 ZIP 和 OSM 圖資，下次直接用，不用每週重抓 1GB (也對政府伺服器比較禮貌)
+      - uses: actions/cache@v4
+        with:
+          path: |
+            raw_history_zips
+            geo_data
+          key: re-data-${{ github.run_id }}
+          restore-keys: re-data-
+
+      - name: ETL (下載 → PostgreSQL → 清洗)
+        run: Rscript new_All_data_ETL.R
+      - name: 地理編碼
+        run: Rscript new_geocode.R
+      - name: 空間特徵 (設施距離)
+        run: Rscript new_features.R
+      - name: 訓練模型
+        run: Rscript new_model_training.R
+      - name: 匯出 App 資料
+        run: Rscript new_export_app_data.R
+      - name: 部署到 shinyapps.io
+        env:
+          SHINYAPPS_NAME: ${{ secrets.SHINYAPPS_NAME }}
+          SHINYAPPS_TOKEN: ${{ secrets.SHINYAPPS_TOKEN }}
+          SHINYAPPS_SECRET: ${{ secrets.SHINYAPPS_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: Rscript deploy_app.R

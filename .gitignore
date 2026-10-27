@@ -1,0 +1,44 @@
+# .gitignore = 告訴 Git「這些檔案不要追蹤、不要上傳」
+# 原則：程式碼要上傳；資料、模型、暫存檔、密碼不要上傳（太大，或可以用程式重新產生，或有隱私問題）
+
+# --- 大型資料（可以用 new_All_data_ETL.R 重新下載產生）---
+raw_history_zips/
+temp_unzip_all/
+*.rds
+# (原本有一條例外規則讓 App 版模型上傳，但模型長大到 50MB 以上，超過 GitHub 建議的單檔大小；
+#  模型可以用 new_model_training.R 重新產生，GitHub Actions 每週也會重新訓練 → 不放進 Git)
+# 小提醒：.gitignore 的註解一定要獨立一行，寫在同一行後面會被當成檔名的一部分
+
+# --- 圖資（可以用 new_geocode.R 重新下載）---
+geo_data/
+
+# --- 完整模型（300MB 以上，GitHub 單檔上限 100MB）---
+models/*_full.rds
+
+# --- R / RStudio 暫存檔 ---
+.Rhistory
+.Rapp.history
+.RData
+.RDataTmp*
+.Rproj.user/
+
+# --- macOS 系統檔（外接硬碟會產生 ._ 開頭的隱藏檔）---
+.DS_Store
+._*
+
+# --- 密碼與金鑰：永遠不要上傳 ---
+.Renviron
+.env
+
+# --- 大學專題 PDF（個人文件，視需要決定是否公開）---
+*.pdf
+
+# --- 執行紀錄、本機工具設定 ---
+logs/
+.claude/
+
+# --- App 資料 (由 new_export_app_data.R 產生；GitHub Actions 每週會重新產生) ---
+app/data/
+app/models/
+rsconnect/
+app/rsconnect/

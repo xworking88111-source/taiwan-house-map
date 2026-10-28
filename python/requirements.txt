@@ -1,0 +1,10 @@
+# Python 版估價模型需要的套件 (安裝：python -m venv .venv && .venv/bin/pip install -r requirements.txt)
+pandas>=2.2
+numpy>=2.0
+xgboost>=3.0
+scikit-learn>=1.5
+psycopg[binary]>=3.2
+geopandas>=1.0
+scipy>=1.13
+pyarrow>=16
+pytest>=8

@@ -42,3 +42,8 @@ app/data/
 app/models/
 rsconnect/
 app/rsconnect/
+
+# Python 虛擬環境與快取 (每個人自己 pip install，不放進 Git)
+python/.venv/
+__pycache__/
+.pytest_cache/

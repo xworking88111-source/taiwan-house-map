@@ -4,14 +4,23 @@
 
 > 全台 5 年、169 萬筆不動產交易（成屋、預售屋、預售交屋、土地、車位）：自動化 ETL、免費離線地理編碼、互動式行情地圖、市場探勘圖表，以及附「價格區間」與「AI 複檢」的房價預測。
 
+<p align="center">
+  <img src="docs/images/desktop_map.png" width="68%" alt="全台行情地圖">
+  <img src="docs/images/mobile_estimate.png" width="22%" alt="手機版估價">
+</p>
+
 ## 功能
 
 | 功能 | 說明 |
 |---|---|
 | 🗺️ 行情地圖 | 5 種交易類別；全台 → 縣市 → 行政區面量圖，選了行政區後顯示「每棟建物 / 每個建案」，點擊可以看交易明細 |
 | 📊 市場探勘 | 單價趨勢、成交量、建物型態占比、單價分布、行政區排行、屋齡與單價 |
-| 🤖 AI 估價 | XGBoost 預測單價與 P10–P90 行情區間；38 個特徵含交通（捷運、輕軌、台鐵、高鐵、機場、公車）、嫌惡設施、生活機能、附近行情；可選屋況與產權條件（影響幅度由實價登錄備註量化）；列出附近相似成交，並產生 AI 複檢提示詞 |
-| 🔄 自動更新 | GitHub Actions 每週檢查新資料 → ETL → 重新訓練 → 部署 |
+| 🤖 AI 估價 | XGBoost 預測單價與 P10–P90 行情區間；47 個特徵含交通（捷運、輕軌、台鐵、高鐵、機場、公車）、嫌惡設施、生活機能、附近行情、同棟歷史成交、臨路等級；可選屋況與產權條件（影響幅度由實價登錄備註量化）；列出附近相似成交，並產生 AI 複檢提示詞 |
+| 🔄 自動更新 | GitHub Actions 每週：自動化測試 → ETL → 資料品質檢查 → 重新訓練 → 跳動檢查 → 部署 |
+
+| 市場探勘 | AI 估價 |
+|---|---|
+| ![市場探勘](docs/images/desktop_explore.png) | ![AI 估價](docs/images/desktop_estimate.png) |
 
 ## 架構
 
@@ -53,7 +62,16 @@ PostgreSQL (schema re_v2)
 
 - 依建物型態：電梯大樓 **8.5%**、華廈 11.2%、公寓 15.8%、透天厝 17.5%。透天厝的價值大多在土地，面寬、臨路寬度等關鍵資訊實價登錄沒有記錄，是最難預測的型態。
 - 價格區間：XGBoost 分位數迴歸 + 保形校正（Conformalized Quantile Regression），P10–P90 實際涵蓋率 **79.5%**（目標 80%）。
-- 滾動回測：4 個不同上線時間點，加入空間特徵後 MAPE 在 12.3%–14.0% 之間，每一期都比沒有空間特徵的版本低；預測 12 個月的誤差和 6 個月相同（`new_model_backtest.R`）。
+- 滾動回測（`new_model_backtest.R`）：模擬 4 個不同的上線時間點，v3 每一期都比 v2 準；用「以建物為單位的配對 bootstrap」算改進幅度的 95% 信賴區間，全部大於 0 → 改進不是運氣：
+
+  | 上線時間點 | v2 MAPE | v3 MAPE | 改進（百分點） | 95% 信賴區間 |
+  |---|---|---|---|---|
+  | 2024-09 | 14.2% | 13.8% | 0.43 | 0.37 ～ 0.50 |
+  | 2025-03 | 13.7% | 13.3% | 0.37 | 0.30 ～ 0.45 |
+  | 2025-09 | 13.1% | 12.7% | 0.38 | 0.31 ～ 0.45 |
+  | 2026-03 | 12.3% | 12.0% | 0.32 | 0.24 ～ 0.40 |
+
+  預測 12 個月的誤差（12.8%）和 6 個月（12.7%）幾乎相同 → 每週重訓的頻率綽綽有餘。
 - 誤差優化（v3）：每個想法都當成「實驗」，用同一個測試期回測、記錄在 `models/experiments.csv`，有效才放進正式模型（`experiments/`）：
   | 實驗 | 結果 | 採用 |
   |---|---|---|
@@ -63,6 +81,35 @@ PostgreSQL (schema re_v2)
   | 04 附近地價（透天地坪價、同區住宅區土地） | 12.0% → 12.0%，透天略好、大樓略差 | ✗ |
 - 模型監控：每週重訓後，拿上一版估過的 5,000 間房子重估一次，估價差距中位數超過 5% 就停止部署（`new_model_training.R` 第 11 節）。
 - 屋況與產權：從實價登錄備註量化裝潢（+3%～+9%）、屋況不佳（−2%～−13%）、凶宅（約 −38%）的影響（`new_condition_adjust.R`）。
+
+## 品質保證：測試、資料檢查、模型監控
+
+| 機制 | 檢查什麼 | 失敗時 |
+|---|---|---|
+| 自動化測試（`tests/`，testthat 23 項；`python/tests/`，pytest 7 項） | 特徵函數的規則：不能偷看同月或未來的成交（防資料洩漏）、地址解析、時間窗邊界、和逐筆暴力計算的結果一致 | CI 第一步就停，不下載資料 |
+| 資料品質檢查（`new_data_checks.R`，12 條規則） | 完整性（20 季、22 縣市、最新一季筆數）、唯一性、數值範圍、每個門牌都有座標與空間特徵；結果寫進 `re_v2.dq_results` | error 級：停止訓練與部署 |
+| 跳動檢查（`new_model_training.R` §11） | 新模型重估上一版估過的 5,000 間房子，差距中位數 ≤ 5% | 停止部署，網站繼續用上週的模型 |
+
+每個檢查都做過「反向測試」：故意植入資料洩漏 bug、故意弄壞資料（缺一季、重複匯入）、模擬模型異常，確認真的會擋下來。
+
+## Python 版（`python/`）
+
+核心模型（讀資料、特徵工程、XGBoost、評分）用 Python 重新實作，和 R 版逐項對照：
+
+| | R | Python |
+|---|---|---|
+| 清理後筆數 | 763,087 | 763,087 |
+| 基準模型 MAPE | 24.5% | 24.5% |
+| XGBoost MAPE | 12.0% | 12.0% |
+| 透天 / 大樓 / 華廈 / 公寓 | 17.5 / 8.5 / 11.2 / 15.8% | 17.5 / 8.4 / 11.2 / 15.9% |
+
+工具對照：data.table rolling join ↔ `pandas.merge_asof`、RANN ↔ `scipy.cKDTree`、sf ↔ `geopandas`、testthat ↔ `pytest`。
+
+```bash
+cd python && python -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/pytest -q          # 測試
+.venv/bin/python train.py    # 訓練與評分（約 70 秒）
+```
 
 ## 如何執行
 
@@ -82,6 +129,19 @@ source("deploy_app.R")            # 部署到 shinyapps.io（需先設定帳號�
 
 路徑與資料庫連線設定集中在 `config.R`，可以用環境變數覆寫（GitHub Actions 就是這樣用的）。
 
+## 關於我
+
+**Renture** · 求職方向：**資料科學家 / 資料工程師**
+
+這個作品涵蓋兩個角色的完整工作：
+- **資料工程**：政府開放資料的自動化 ETL、PostgreSQL 分層資料模型、離線地理編碼、每週排程的 CI/CD、資料品質檢查
+- **資料科學**：特徵工程（空間、時間、同棟歷史）、時間切分回測、實驗紀錄、分位數迴歸 + 保形校正、模型監控
+
+開發過程、每個技術選擇的理由、遇過的錯誤與修正都記錄在 [學習筆記](docs/學習筆記.md)。
+
+- GitHub：[xworking88111-source](https://github.com/xworking88111-source)
+- Email：[xworking88111@gmail.com](mailto:xworking88111@gmail.com)
+
 ## 資料來源與授權
 
 - 不動產成交資料：[內政部不動產交易實價查詢服務網](https://plvr.land.moi.gov.tw/)（政府資料開放授權條款）
@@ -98,4 +158,4 @@ source("deploy_app.R")            # 部署到 shinyapps.io（需先設定帳號�
 
 ## 技術
 
-R · PostgreSQL · SQL · sf (GIS) · XGBoost · ranger · Shiny · bslib · Leaflet · Plotly · Claude API · GitHub Actions
+R · Python (pandas, scikit-learn, geopandas) · PostgreSQL · SQL · sf (GIS) · XGBoost · ranger · Shiny · bslib · Leaflet · Plotly · testthat · pytest · GitHub Actions

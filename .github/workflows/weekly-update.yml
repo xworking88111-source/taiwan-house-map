@@ -129,6 +129,12 @@ jobs:
             scales
             RANN
             data.table
+            testthat
+
+      # 自動化測試：特徵函數的規則 (防資料洩漏、地址解析…) 先驗證，有錯就不往下跑 (約 10 秒)
+      # 放在最前面 = fail fast：程式邏輯錯了，下載資料 20 分鐘也是白費
+      - name: 自動化測試 (testthat)
+        run: Rscript tests/run_tests.R
 
       # 快取：下載過的季資料 ZIP 和 OSM 圖資，下次直接用，不用每週重抓 1GB (也對政府伺服器比較禮貌)
       # 拆成「讀取 (restore)」和「存檔 (save)」兩步：
@@ -148,6 +154,8 @@ jobs:
         run: Rscript new_geocode.R
       - name: 空間特徵 (設施距離)
         run: Rscript new_features.R
+      - name: 資料品質檢查 (資料壞了就停止，不訓練、不部署)
+        run: Rscript new_data_checks.R
       - name: 訓練模型 (含跳動檢查：和上週模型差太多就停止，不部署)
         run: Rscript new_model_training.R
       # 存快取放在「訓練之後」：geo_data/drift_ref.rds (跳動檢查的參考答案) 才會留到下週

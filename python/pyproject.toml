@@ -1,0 +1,4 @@
+# pytest 設定：pythonpath = "." → 測試可以直接 import twre (不用另外安裝成套件)
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

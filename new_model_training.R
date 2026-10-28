@@ -200,6 +200,9 @@ saveRDS(list(features = features, x = drift_x, pred = predict(xgb_fit, drift_x),
 dir.create("models", showWarnings = FALSE)
 model_meta <- list(features = features,
                    price_bounds = as.data.frame(price_bounds(df_raw)),   # 離群值門檻：網站篩選同棟歷史要用同一組
+                   # 每種型態「土地持分 ÷ 建物坪數」的合理範圍 (第 1~99 百分位)：網站遇到範圍外的輸入會提醒使用者
+                   land_ratio_range = as.data.frame(df %>% group_by(b_category) %>%
+                     summarise(lo = quantile(land_ratio, .01, na.rm = TRUE), hi = quantile(land_ratio, .99, na.rm = TRUE))),
                    factor_levels = fac_levels, t_month_idx_max = max(df$t_month_idx),
                    trained_at = Sys.time(), metrics = results)
 # 完整版 (含隨機森林)：分位數森林會把整份訓練資料存在模型裡 → 檔案約 300MB 以上，只留在本機

@@ -38,6 +38,7 @@ load_training_data <- function(schema = "re_v2") {
            f.floor_num, f.total_floors_num, f.rooms, f.halls, f.baths,
            f.has_elevator, f.has_management, f.include_parking, f.parking_price_unknown,
            f.pure_house_unit_price_ping, f.pure_house_total_price,
+           f.total_price, f.total_ping, f.parking_type, f.parking_price, f.parking_ping,   -- 車位實驗 (06) 用
            g.lng, g.lat, g.geo_level,
            gf.x AS tx, gf.y AS ty,          -- TWD97 公尺座標 (改名避免和目標變數 y 撞名)
            ", fac_sql, ", ", cnt_sql, "

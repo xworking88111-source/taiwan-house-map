@@ -42,10 +42,9 @@ df_raw <- dbGetQuery(con, paste0("
            ELSE total_price END AS pure_house_total_price,
       CASE WHEN include_parking = '是' AND parking_ping > 0 THEN total_ping - parking_ping
            ELSE total_ping END AS pure_house_ping,
-      CASE WHEN include_parking = '是' AND parking_price > 0 AND (total_ping - COALESCE(parking_ping, 0)) > 0
-           THEN ROUND((total_price - parking_price) / (total_ping - COALESCE(parking_ping, 0)), 0)
-           ELSE unit_price_ping END AS pure_house_unit_price_ping,
-      (include_parking = '是' AND COALESCE(parking_price, 0) = 0) AS parking_price_unknown
+      -- 和 fact_residential_house 相同的定義 (說明見 new_All_data_ETL.R 第 6 節)
+      unit_price_ping AS pure_house_unit_price_ping,
+      (include_parking = '是' AND NOT (COALESCE(parking_price, 0) > 0 AND COALESCE(parking_ping, 0) > 0)) AS parking_price_unknown
     FROM real_estate_clean
     WHERE trading_type = '房地產成屋' AND total_ping > 0 AND unit_price_ping > 10000
       AND (is_special_deal = '否' OR note ~ '凶宅|兇宅|非自然|事故|海砂|輻射')

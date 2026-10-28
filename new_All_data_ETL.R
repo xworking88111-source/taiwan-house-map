@@ -392,12 +392,14 @@ dbExecute(con, "
     -- 純房屋坪數 (扣掉車位坪數)
     CASE WHEN include_parking = '是' AND parking_ping > 0
          THEN total_ping - parking_ping ELSE total_ping END AS pure_house_ping,
-    -- 扣車位的純單價 (舊版這裡寫成 'Tier_1'，條件永遠不成立)
-    CASE WHEN include_parking = '是' AND parking_price > 0 AND (total_ping - COALESCE(parking_ping, 0)) > 0
-         THEN ROUND((total_price - parking_price) / (total_ping - COALESCE(parking_ping, 0)), 0)
-         ELSE unit_price_ping END AS pure_house_unit_price_ping,
-    -- 車位有登記但沒有拆價：單價被車位坪數稀釋，模型要知道這件事
-    (include_parking = '是' AND COALESCE(parking_price, 0) = 0) AS parking_price_unknown
+    -- 單價：直接用政府公布的單價 (內政部規則：車位價格「和」面積都有提供時，
+    --   單價 = (總價 − 車位價) ÷ (建物移轉面積 − 車位面積)；否則 = 總價 ÷ 建物移轉面積，車位混在裡面)
+    -- 舊版自己算：車位只有價格、沒有面積時用 (總價 − 車位價) ÷ 含車位的面積 → 單價被低估約 24%
+    --   (2026-10-28 用 34 萬筆大樓驗算：價格面積都有的那一類，自己算和政府公布的 100% 相同)
+    unit_price_ping AS pure_house_unit_price_ping,
+    -- 車位沒有「完整」拆開 (價格或面積缺一個)：單價混了車位、偏低 13~24% → 模型要知道這件事
+    -- (舊版只看價格 = 0，漏掉「有價格、沒面積」的那一類)
+    (include_parking = '是' AND NOT (COALESCE(parking_price, 0) > 0 AND COALESCE(parking_ping, 0) > 0)) AS parking_price_unknown
   FROM real_estate_clean
   WHERE trading_type = '房地產成屋'
     AND is_special_deal = '否'

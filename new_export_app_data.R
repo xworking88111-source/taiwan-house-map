@@ -43,15 +43,17 @@ trades <- dbGetQuery(con, "
     SELECT serial_number AS id,
            CASE WHEN trading_type = '預售交屋' THEN '預售交屋' ELSE '成屋' END AS category,
            city, district, b_category, trans_ym, total_price,
-           -- 扣車位單價 (元/坪)，和 fact_residential_house 的算法相同
-           CASE WHEN include_parking = '是' AND parking_price > 0 AND total_ping - COALESCE(parking_ping, 0) > 0
-                THEN (total_price - parking_price) / (total_ping - COALESCE(parking_ping, 0))
-                ELSE unit_price_ping END AS unit_price,
-           CASE WHEN include_parking = '是' AND parking_price > 0 THEN total_ping - COALESCE(parking_ping, 0)
+           -- 單價、坪數的定義和 fact_residential_house 相同 (說明見 new_All_data_ETL.R 第 6 節)：
+           --   單價 = 政府公布的單價 (車位價格、面積都有拆開時已扣車位；沒拆開時車位混在裡面)
+           --   坪數 = 建物移轉面積 − 車位面積 (含公設、不含車位)
+           unit_price_ping AS unit_price,
+           CASE WHEN include_parking = '是' AND parking_ping > 0 THEN total_ping - parking_ping
                 ELSE total_ping END AS ping,
            land_ping, house_age_at_trans AS age, floor_num, total_floors_num, rooms, halls, baths,
            (include_parking = '是') AS parking, (has_elevator = '有') AS elevator,
-           address_norm, addr_key, NULL::TEXT AS build_case, FALSE AS cancelled
+           address_norm, addr_key, NULL::TEXT AS build_case, FALSE AS cancelled,
+           -- 車位沒拆開 (價格或面積缺一個) → 單價混了車位、偏低 13~24%；網站的相似成交會排除這種
+           (include_parking = '是' AND NOT (COALESCE(parking_price, 0) > 0 AND COALESCE(parking_ping, 0) > 0)) AS park_mixed
     FROM real_estate_clean
     WHERE trading_type IN ('房地產成屋', '年份不明成屋', '預售交屋') AND is_special_deal = '否'
   )
@@ -63,7 +65,7 @@ trades <- dbGetQuery(con, "
   SELECT p.serial_number, '預售屋', p.city, p.district, p.b_category, p.trans_ym, p.total_price,
          p.pure_house_unit_price_ping, p.pure_house_ping, p.land_ping, NULL, p.floor_num, p.total_floors_num,
          p.rooms, p.halls, p.baths, (p.parking_price > 0 OR p.parking_ping > 0), NULL,
-         p.address_norm, p.addr_key, p.build_case, p.is_cancelled, g.lng, g.lat, g.geo_level
+         p.address_norm, p.addr_key, p.build_case, p.is_cancelled, NULL::BOOLEAN, g.lng, g.lat, g.geo_level
   FROM fact_presale_contract p LEFT JOIN geo_cache g USING (addr_key)
   WHERE p.is_special_deal = '否' AND p.pure_house_ping BETWEEN 3 AND 500
     AND p.pure_house_unit_price_ping BETWEEN 10000 AND 5000000
@@ -72,14 +74,14 @@ trades <- dbGetQuery(con, "
   UNION ALL
   SELECT serial_number, '土地', city, district, '土地', trans_ym, total_price,
          unit_price_ping, land_ping, land_ping, NULL, NULL, NULL, NULL, NULL, NULL, FALSE, NULL,
-         address_norm, NULL, NULL, FALSE, NULL, NULL, 'district'
+         address_norm, NULL, NULL, FALSE, NULL, NULL, NULL, 'district'
   FROM fact_land_only
   WHERE is_special_deal = '否' AND land_ping > 0 AND unit_price_ping > 0
 
   UNION ALL
   SELECT serial_number, '車位', city, district, '車位', trans_ym, total_price,
          NULL, parking_ping, NULL, NULL, NULL, NULL, NULL, NULL, NULL, TRUE, NULL,
-         address_norm, addr_key, NULL, FALSE, NULL, NULL, 'district'
+         address_norm, addr_key, NULL, FALSE, NULL, NULL, NULL, 'district'
   FROM fact_parking_only
   WHERE is_special_deal = '否' AND total_price > 0;") %>% as_tibble()
 
@@ -147,16 +149,27 @@ unlink(list.files("app/data", pattern = "^trades.*\\.rds$", full.names = TRUE)) 
 #      土地、車位：只畫面量圖和統計圖，用不到經緯度、地址 (34 萬筆地號字串很占空間)、屋齡、樓層
 #      成屋、預售交屋：沒有建案名稱、解約
 cols_drop <- list(
-  "土地"     = c("lng", "lat", "glng", "glat", "geo_level", "address", "age", "floor_num", "total_floors_num", "build_case", "cancelled"),
-  "車位"     = c("lng", "lat", "glng", "glat", "geo_level", "address", "age", "floor_num", "total_floors_num", "build_case", "cancelled"),
+  "土地"     = c("lng", "lat", "glng", "glat", "geo_level", "address", "age", "floor_num", "total_floors_num", "build_case", "cancelled", "park_mixed"),
+  "車位"     = c("lng", "lat", "glng", "glat", "geo_level", "address", "age", "floor_num", "total_floors_num", "build_case", "cancelled", "park_mixed"),
   "成屋"     = c("build_case", "cancelled"),                     # glng / glat：估價用的真實座標 (同棟歷史)
   "預售交屋" = c("build_case", "cancelled"),
-  "預售屋"   = c("glng", "glat"))                                # 預售屋不會被拿來當「同棟歷史」，只需要顯示用座標
+  "預售屋"   = c("glng", "glat", "park_mixed"))                                # 預售屋不會被拿來當「同棟歷史」，只需要顯示用座標
 for (cc in unique(as.character(trades$category))) {
   d <- trades[trades$category == cc, setdiff(names(trades), cols_drop[[cc]])]
   saveRDS(d, file.path("app/data", paste0("trades_", cc, ".rds")), compress = "xz")
 }
+# 車位行情表：網站勾「含車位」時，總價要加上車位價值 (模型估的單價是「扣掉車位」的房屋單價)
+# 只用「車位價格、面積都有拆開」的成交 (官方算法：這種成交的單價才是乾淨的)，近 24 個月、依 縣市 × 區 × 車位類型
+parking_tbl <- dbGetQuery(con, "
+  SELECT city, district, parking_type, percentile_cont(0.5) WITHIN GROUP (ORDER BY parking_price) AS price,
+         count(*)::INT AS n   -- ::INT：count() 是 64 位元整數 (bigint)，R 讀成 integer64 會變成亂碼般的小數
+  FROM real_estate_clean
+  WHERE parking_price > 0 AND parking_ping > 0 AND parking_type IS NOT NULL
+    AND trading_type IN ('房地產成屋', '預售交屋') AND is_special_deal = '否'
+    AND trans_ym >= (SELECT max(trans_ym) FROM real_estate_clean) - INTERVAL '24 months'
+  GROUP BY GROUPING SETS ((city, district, parking_type), (city, parking_type), (city))")   # 樣本不夠時往上一層找
 meta <- list(
+  parking_tbl   = parking_tbl,
   data_months   = range(trades$trans_ym),
   city_levels   = levels(trades$city),
   district_list = lapply(split(as.character(trades$district), as.character(trades$city)), \(x) sort(unique(x))),

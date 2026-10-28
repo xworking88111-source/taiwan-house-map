@@ -138,34 +138,54 @@ parking_value <- function(city, district, type, n = 1) {
   list(value = 0, label = "這個區域的車位成交太少，總價沒有加上車位")
 }
 
+# --- 3-1. 使用分區、主建物比例 (v4 特徵)：使用者不知道時，用同 縣市 × 區 × 型態 最常見的情況 --------
+# 「非都市土地」和「不知道」要分開：訓練資料裡分區空白 (代碼 0) 多半是非都市土地，不等於「不知道」
+zoning_choices <- c("不知道" = "", "住宅區" = "住", "商業區" = "商", "工業區" = "工", "農業區" = "農",
+                    "非都市土地" = "非都市", "其他" = "其他")
+impute_lookup <- function(city, district, type) {
+  it <- model$impute_tbl
+  if (is.null(it)) return(list(zoning = 1L, main_ratio = NA_real_))
+  r <- it[it$city == city & it$district == district & it$b_category == type, ]
+  if (nrow(r) == 0) r <- it[it$city == city & it$b_category == type, ][1, ]
+  list(zoning = r$zoning_mode[1] %||% 1L, main_ratio = r$main_ratio_med[1])
+}
+
 # --- 3a. 使用者輸入 → 估價需要的全部資訊 (定位 + 所有特徵) ------------------------------
 # 為什麼要從 server 裡搬出來？
 #   寫在 eventReactive() 裡面時，只有「按下網頁按鈕」才能執行，測試程式呼叫不到。
 #   抽成一般函數後，tests/serving_consistency.R 可以直接餵它「真實成交的條件」，
 #   檢查網站算出的特徵和訓練時算的一不一樣 (training-serving skew 測試)
 make_estimate_input <- function(city, district, road, type, age, ping, land, floor, total_floors,
-                                rooms, baths, parking, elevator, management) {
+                                rooms, baths, parking, elevator, management, leasehold = FALSE,
+                                zoning = "", main_ping = NA) {
+  if (isTRUE(leasehold)) land <- 0                # 地上權：沒有土地所有權 → 土地持分 0
   loc <- locate_address(city, district, road)
   is_house <- type == "透天厝"
   # 土地持分：有填就用；沒填就用同區同型態的中位數比例推估 (見 impute_land_ratio 的說明)
-  land_given <- !is.na(land) && land > 0
+  land_given <- (!is.na(land) && land > 0) || isTRUE(leasehold)
   inp <- list(
     city = city, district = district, road = road %||% "",
     type = type, age = age, ping = ping,
     land = if (land_given) land else impute_land_ratio(city, district, type) * ping,
-    land_imputed = !land_given,
+    land_imputed = !land_given, leasehold = isTRUE(leasehold),
     floor = if (is_house) NA_real_ else floor,
     total_floors = total_floors,      # 透天也要給 (舊版給 NA：一致性測試抓到的 skew，訓練時透天有總樓層)
     rooms = rooms, baths = baths,
     parking = parking, elevator = elevator, management = management,
     lng = loc$lng, lat = loc$lat
   )
+  imp <- impute_lookup(city, district, type)
+  inp$zoning_imputed <- is.null(zoning) || !nzchar(zoning)
+  inp$zoning_code <- if (inp$zoning_imputed) imp$zoning else zoning_code_of(zoning)
+  mr <- main_ratio_of(main_ping %||% NA, ping)
+  inp$main_imputed <- is.na(mr)
+  inp$main_ratio <- if (is.na(mr)) imp$main_ratio else mr
   # 土地持分比例異常低 / 高 → 提醒使用者 (不改數字：訓練資料裡真的有這種成交，改了反而和訓練不一致)
   # 例：鳳山 35 年、50 坪的大樓填土地 1.6 坪 (比例 3.2%)。高雄 25~45 年的大樓，土地比例 < 2.5% 的 305 筆成交裡
   #     有 209 筆土地是 0 —— 多半是「地上權房屋、土地向市府承租」，單價中位數只有 10.4 萬/坪。
   #     模型分不出「一般房子、土地持分剛好很少」和「沒有土地所有權」，所以會大幅降價 (約 -20%)
   rr <- model$land_ratio_range
-  if (!is.null(rr) && land_given && ping > 0) {
+  if (!is.null(rr) && land_given && !isTRUE(leasehold) && ping > 0) {
     j <- match(type, rr$b_category); ratio <- land / ping
     if (!is.na(j) && (ratio < rr$lo[j] || ratio > rr$hi[j])) {
       inp$land_warning <- sprintf(paste0("土地持分佔建物坪數 %.1f%%，超出%s常見範圍 (%.1f%% ~ %.1f%%)。",
@@ -199,6 +219,7 @@ build_model_input <- function(inp) {
     elevator = as.integer(inp$elevator), management = as.integer(inp$management),
     parking = as.integer(inp$parking), parking_unknown = 0L,
     t_month_idx = model$t_month_idx_max,          # 用「資料中最新的月份」= 預測現在的行情
+    zoning_code = inp$zoning_code %||% NA_integer_, main_ratio = inp$main_ratio %||% NA_real_,
     lng = inp$lng, lat = inp$lat
   )
   # 空間特徵：到各類設施的距離、附近行情 (和訓練時用同一個函數算，見 shared_features.R)
@@ -216,7 +237,33 @@ predict_price <- function(inp) {
   q  <- predict(xgb_quant, x)                     # 模型預測的是 log(元/坪)
   cq <- model$conformal_q %||% 0                  # 保形校正加寬量 (訓練時算好的，見 new_model_training.R)
   list(point = exp(predict(xgb_point, x)),        # exp() 把 log 轉回 元/坪
-       p10 = exp(q[1] - cq), p50 = exp(q[2]), p90 = exp(q[3] + cq))
+       p10 = exp(q[1] - cq), p50 = exp(q[2]), p90 = exp(q[3] + cq),
+       explain = explain_price(x))
+}
+
+# --- 3c. 估價拆解：每一類因素讓價格「加減多少 %」(SHAP 值) ----------------------------
+# XGBoost 可以把一筆預測拆成「基準值 + 每個特徵的貢獻」(predcontrib = TRUE，算法叫 TreeSHAP)：
+#   log(單價) = 基準 + 貢獻_1 + 貢獻_2 + … → 單價 = exp(基準) × exp(貢獻_1) × exp(貢獻_2) × …
+#   基準 = 模型對「全台平均」的估價；exp(貢獻) − 1 = 這個因素讓價格高 / 低幾 %
+# 47 個特徵太細，使用者看不懂 → 依意義合併成十幾類 (同一類的貢獻相加，在 log 尺度上相加是正確的)
+explain_groups <- list(
+  "附近行情" = c("nbr_lp", "nbr_n", "nbr_lp_all"), "同棟歷史成交" = c("bld_lp", "bld_n", "bld_dt"),
+  "地段 (縣市、區、位置)" = c("city", "district", "lng", "lat"), "屋齡" = "house_age_at_trans",
+  "坪數與格局" = c("pure_house_ping", "rooms", "baths"), "土地持分" = "land_ratio",
+  "樓層" = c("floor_num", "total_floors_num", "floor_ratio", "is_top_floor"), "建物型態" = "b_category",
+  "電梯、管理、車位" = c("elevator", "management", "parking", "parking_unknown"),
+  "交通 (捷運、台鐵、公車…)" = c("d_mrt", "d_lrt", "d_tra", "d_hsr", "d_airport", "d_bus", "n_bus_500"),
+  "生活機能" = c("d_school", "d_park", "d_hospital", "d_market", "n_convenience_500"),
+  "嫌惡設施" = c("d_cemetery", "d_landfill", "d_wastewater", "d_industrial", "d_military", "d_fuel"),
+  "臨路條件" = c("lane_depth", "road_type", "road_class", "d_major_road"), "交易時間 (行情趨勢)" = "t_month_idx",
+  "使用分區" = "zoning_code", "公設比 (主建物比例)" = "main_ratio")
+explain_price <- function(x) {
+  cb <- predict(xgb_point, x, predcontrib = TRUE)[1, ]
+  base <- cb[["(Intercept)"]]
+  g <- vapply(explain_groups, function(f) sum(cb[intersect(f, names(cb))]), numeric(1))
+  other <- sum(cb[setdiff(names(cb), c("(Intercept)", unlist(explain_groups)))])   # 之後新增的特徵還沒歸類時
+  if (abs(other) > 1e-9) g <- c(g, "其他" = other)
+  list(base = exp(base), pct = exp(g) - 1)
 }
 
 # 同棟歷史成交特徵 (和訓練時 new_features.R 的 building_history() 同定義)：
@@ -249,7 +296,7 @@ find_comparables <- function(inp, n = 10) {
   h <- trades_by_cat[["成屋"]]
   d <- h[h$city == inp$city & h$district == inp$district & h$b_category == inp$type, ]
   d <- d[!is.na(d$age) & abs(d$age - inp$age) <= 8 & d$ping >= inp$ping * 0.6 & d$ping <= inp$ping * 1.4, ]
-  # 車位沒拆開的成交，單價混了車位面積和價格 (偏低 13~24%，見學習筆記第 18 章) → 拿來比較會誤導，排除
+  # 車位沒拆開的成交，單價混了車位面積和價格 (偏低 13~24%，見 docs/技術說明.md「資料定義」) → 拿來比較會誤導，排除
   # (舊的資料檔沒有 park_mixed 欄位時照舊)
   if (!is.null(d$park_mixed)) d <- d[!(d$park_mixed %in% TRUE), ]
   if (nrow(d) == 0) return(d)
@@ -355,7 +402,10 @@ describe_surroundings <- function(g, nbr, type) {
 # 使用者選了屋況、特殊情況後，用實際成交量出來的影響幅度調整 (多個條件相乘)。
 # (「毛胚」原本也是選項，但成屋裡備註寫毛胚的只有 2 筆 (毛胚屋大多是預售屋交屋)，量不出可信的影響 → 拿掉)
 cond_levels <- c("需大整修 (漏水、壁癌、老舊)" = "屋況不佳", "一般屋況" = "一般", "有裝潢 / 附家具家電" = "含裝潢")
-special_levels <- c("帶租約" = "帶租約", "凶宅" = "凶宅", "海砂屋 / 輻射屋" = "海砂輻射")
+special_levels <- c("帶租約" = "帶租約", "凶宅" = "凶宅", "海砂屋 / 輻射屋" = "海砂輻射",
+                    "地上權 (土地無所有權)" = "地上權")
+# 地上權不用「備註殘差」調整：模型本身就學過 (土地持分 = 0 的成交，多半是地上權房屋，見技術說明)
+# → 勾選時把土地持分設成 0、重新估價 (make_estimate_input 的 leasehold)
 get_adj <- function(cond, type) {
   if (is.null(cond_tbl) || cond == "一般") return(list(adj = 0, n = NA, pooled = FALSE))
   tg <- if (type == "套房") "電梯大樓" else type
@@ -366,7 +416,7 @@ get_adj <- function(cond, type) {
   list(adj = r$adj[1], n = r$n[1], pooled = r$use_pooled[1], insufficient = FALSE)
 }
 total_adj <- function(cond, specials, type) {
-  parts <- c(cond, specials)
+  parts <- c(cond, setdiff(specials, "地上權"))      # 地上權已經反映在模型估價裡 (土地 = 0)，不重複調整
   a <- lapply(parts, get_adj, type = type); names(a) <- parts
   list(factor = prod(sapply(a, function(x) 1 + x$adj)), parts = a)
 }
@@ -377,7 +427,7 @@ total_adj <- function(cond, specials, type) {
 #   免費作品集沒辦法負擔，所以改成：App 把「物件條件 + 模型估價 + 10 筆相似成交」整理成提示詞，
 #   使用者複製後貼到自己的 Gemini / ChatGPT / Claude → 開發者成本 0，使用者也能自由追問。
 # 設計原則不變：AI 不自己猜價格，而是根據我們提供的實際資料「解釋與檢查」模型結果。
-# (之後如果要做成內建功能，可以用 Claude Haiku 這類便宜的模型 + 每人每天次數上限，見學習筆記)
+# (之後如果要做成內建功能，可以用 Claude Haiku 這類便宜的模型 + 每人每天次數上限)
 build_ai_prompt <- function(inp, pred, comps) {
   comp_txt <- if (nrow(comps) == 0) "（附近沒有找到條件相近的成交）" else paste(sprintf(
     "- %s｜%s｜%.1f 坪｜屋齡 %d 年｜單價 %.1f 萬/坪｜總價 %s 萬｜距離約 %d 公尺",
@@ -588,6 +638,10 @@ ui <- page_navbar(
             "591 等網站的「總面積」通常含車位，請先扣掉車位坪數。"),
         numericInput("p_land", "土地持分坪數 (選填)", 30, min = 0, max = 500),
         div(class = "small-note mb-2", "不知道可以留空，系統會用同區、同型態的中位數推估。"),
+        layout_columns(
+          selectInput("p_zoning", "使用分區", zoning_choices, selected = ""),
+          numericInput("p_main_ping", "主建物坪數 (選填)", NA, min = 0, max = 500)),
+        div(class = "small-note mb-2", "權狀或 591 物件頁上有寫；不知道可以留空，系統用同區、同型態最常見的情況推估。"),
         # 透天只有「總樓層」(整棟都是自己的，沒有所在樓層)；訓練資料裡 97% 的透天都有總樓層，模型會用到
         layout_columns(conditionalPanel("input.p_type != '透天厝'", numericInput("p_floor", "所在樓層", 8, min = 1, max = 90)),
                        numericInput("p_tfloor", "總樓層", 3, min = 1, max = 90)),
@@ -624,6 +678,8 @@ ui <- page_navbar(
       card(card_header(tags$span(icon("screwdriver-wrench"), " 屋況與產權對價格的影響")),
            plotlyOutput("p_cond_plot", height = "260px"),
            div(class = "small-note", uiOutput("p_cond_note"))),
+      card(card_header(tags$span(icon("chart-simple"), " 估價拆解：模型怎麼算出這個價格")),
+           uiOutput("p_explain_text"), plotlyOutput("p_explain_plot", height = "420px")),
       card(card_header(tags$span(icon("location-dot"), " 定位與估價依據")), uiOutput("p_basis")),
       uiOutput("p_history_card"),
       card(card_header("附近相似成交 (同區、同型態、屋齡 ±8 年、坪數 ±40%，由近到遠)"),
@@ -1052,13 +1108,16 @@ server <- function(input, output, session) {
     updateNumericInput(session, "p_tfloor", value = if (input$p_type == "透天厝") 3 else 15)   # 透天常見 3 層
   }, ignoreInit = TRUE)
   # eventReactive：只有按下「開始估價」才計算 (不是每改一個輸入就重算)
-  est <- eventReactive(input$p_go, {
+  # 勾選 / 取消「地上權」會改變模型的輸入 (土地持分)，所以也要重新估價；其他特殊情況只是乘上調整幅度
+  est <- eventReactive(list(input$p_go, "地上權" %in% input$p_special), ignoreInit = TRUE, {
     validate(need(!is.na(input$p_age) && !is.na(input$p_ping) && input$p_ping > 0, "請輸入屋齡與坪數"))
     e <- make_estimate_input(city = input$p_city, district = input$p_district, road = input$p_road %||% "",
                              type = input$p_type, age = input$p_age, ping = input$p_ping, land = input$p_land,
                              floor = input$p_floor, total_floors = input$p_tfloor,
                              rooms = input$p_rooms, baths = input$p_baths, parking = input$p_parking,
-                             elevator = input$p_elevator, management = input$p_mgmt)
+                             elevator = input$p_elevator, management = input$p_mgmt,
+                             leasehold = "地上權" %in% input$p_special,
+                             zoning = input$p_zoning, main_ping = input$p_main_ping)
     inp <- e$inp; loc <- e$loc
     # 車位價值另外加 (模型的單價不含車位)：沒勾含車位 → 0
     pk <- if (isTRUE(input$p_parking)) parking_value(input$p_city, input$p_district, input$p_park_type, input$p_park_n)
@@ -1099,6 +1158,25 @@ server <- function(input, output, session) {
   })
 
   # 不同屋況的估價並排比較 (= 「價值區間」的概念：同一間房子，屋況不同，價值不同)
+  output$p_explain_text <- renderUI({
+    ex <- est()$pred$explain
+    div(class = "small-note mb-1", sprintf(paste0(
+      "從全台平均約 %.1f 萬/坪出發，每一類因素讓價格上升 (紫) 或下降 (粉)。各項是「相乘」：例如 +10%% 再 −10%% 是 −1%%。",
+      "這是一般屋況的模型估價，還沒套用屋況、特殊情況的調整。"), ex$base / 1e4))
+  })
+  output$p_explain_plot <- renderPlotly({
+    ex <- est()$pred$explain
+    d <- tibble(name = names(ex$pct), pct = unname(ex$pct)) %>% filter(abs(pct) >= 0.005) %>%
+      arrange(pct) %>% mutate(name = factor(name, levels = name))
+    plot_ly(d, y = ~name, x = ~pct * 100, type = "bar", orientation = "h",
+            marker = list(color = ifelse(d$pct >= 0, brand$primary, brand$accent)),
+            text = sprintf("%+.1f%%", d$pct * 100), textposition = "outside", cliponaxis = FALSE,
+            hoverinfo = "y+text") %>%
+      # 左右各留 40% 空間給數字標籤 (第一版最長的兩條，數字被切掉)
+      plot_layout(xaxis = list(title = "對價格的影響 (%)", zeroline = TRUE, ticksuffix = "%",
+                               range = c(-1, 1) * max(abs(d$pct) * 100, 1) * 1.4),
+                  yaxis = list(title = ""), margin = list(l = 10, r = 40))
+  })
   output$p_cond_plot <- renderPlotly({
     e <- est(); a <- adj_pred()
     sp <- input$p_special
@@ -1175,10 +1253,17 @@ server <- function(input, output, session) {
     tags$ul(class = "basis-list",
       tags$li(tags$b("定位："), l$label, "（精準到", l$level, "）"),
       tags$li(tags$b("土地持分："), sprintf("%.1f 坪", e$inp$land),
+              if (isTRUE(e$inp$leasehold)) "（地上權：沒有土地所有權，以 0 坪估價）" else
               if (isTRUE(e$inp$land_imputed)) sprintf("（沒有填寫，用%s%s%s的中位數比例推估）",
                                                       e$inp$city, e$inp$district, e$inp$type) else "（使用者填寫）",
               if (!is.null(e$inp$land_warning)) tags$div(class = "text-danger small", icon("triangle-exclamation"), e$inp$land_warning)),
       if (isTRUE(e$inp$parking)) tags$li(tags$b("車位："), e$inp$park_label),
+      tags$li(tags$b("使用分區 / 公設："),
+              sprintf("%s%s；主建物佔權狀 %s%s",
+                      c("非都市土地", "住宅區", "商業區", "工業區", "農業區", "其他")[(e$inp$zoning_code %||% 1L) + 1],
+                      if (isTRUE(e$inp$zoning_imputed)) " (同區同型態最常見，推估)" else "",
+                      if (is.na(e$inp$main_ratio)) "—" else sprintf("%.0f%%", 100 * e$inp$main_ratio),
+                      if (isTRUE(e$inp$main_imputed)) " (同區同型態中位數，推估)" else "")),
       with(describe_surroundings(e$inp$geo, e$inp$nbr, e$inp$type), tagList(
         tags$li(tags$b("交通："), transit),
         tags$li(tags$b("生活機能："), life),

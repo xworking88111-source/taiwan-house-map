@@ -10,4 +10,4 @@
 | `Adjusted_app.R` | 第一版 App 的調整版 | `app/app.R` |
 | `test_SQL.R` | 測試資料庫連線的小程式 | `config.R` 的 `db_connect()` |
 
-> 如果需要重建舊的 public schema 資料表：`All_data_ETL.R` 第 188–352 行的 SQL (見學習筆記第二輪)。
+> 如果需要重建舊的 public schema 資料表：`All_data_ETL.R` 第 188–352 行的 SQL (只重建 public schema 時需要)。

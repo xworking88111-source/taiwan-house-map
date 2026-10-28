@@ -85,3 +85,18 @@ road_features <- function(rest, xy, rt) {
     d_major_road = round(RANN::nn2(rt$major, xy, k = 1)$nn.dists[, 1])
   )
 }
+
+# --- 使用分區、主建物比例 (v4 特徵，實驗 05：MAPE 11.88% → 11.77%) ----------------------
+# 實價登錄「都市土地使用分區」→ 代碼。訓練 (R/model_lib.R) 和網站共用這一份，避免兩邊對應不一致
+#   0 = 空白 (多半是非都市土地)  1 = 住宅區  2 = 商業區  3 = 工業區  4 = 農業區  5 = 其他 (保護區、道路用地…)
+zoning_code_of <- function(z) {
+  z <- ifelse(is.na(z), "", z)
+  ifelse(z == "" | z == "非都市", 0L,
+  ifelse(z == "住" | grepl("住宅區", z), 1L,
+  ifelse(z == "商" | grepl("商業區", z), 2L,
+  ifelse(z == "工" | grepl("工業區", z), 3L,
+  ifelse(z == "農" | grepl("農業區", z), 4L, 5L)))))
+}
+# 主建物 ÷ 權狀坪數 (= 1 − 公設與附屬建物的比例)。超過 1.5 的多半是登記錯誤 → 截到 1.5
+main_ratio_of <- function(main_ping, ping) ifelse(!is.na(main_ping) & main_ping > 0 & !is.na(ping) & ping > 0,
+                                                  pmin(main_ping / ping, 1.5), NA_real_)

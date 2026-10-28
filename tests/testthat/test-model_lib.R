@@ -9,7 +9,8 @@ toy <- tibble(
   floor_num = c(NA, 5, 10), total_floors_num = c(3, 10, 10), pure_house_ping = c(40, 30, 20),
   land_ping = c(20, 3, 2), has_elevator = c(NA, "有", "有"), has_management = c("無", "有", NA),
   include_parking = c("否", "是", "否"), parking_price_unknown = c(FALSE, TRUE, FALSE),
-  pure_house_unit_price_ping = c(2e5, 3e5, 1e6)
+  pure_house_unit_price_ping = c(2e5, 3e5, 1e6),
+  zoning = c("住", "都市：其他:商業區", NA), main_ping = c(38, 18, NA)
 )
 
 test_that("engineer_features：月份編號、樓層比、頂樓、缺值處理", {
@@ -20,6 +21,14 @@ test_that("engineer_features：月份編號、樓層比、頂樓、缺值處理"
   expect_equal(f$is_top_floor, c(0L, 0L, 1L))
   expect_equal(f$elevator, c(0L, 1L, 1L))                     # NA → 0 (沒寫就當沒有)，不能是 NA
   expect_equal(f$management, c(0L, 1L, 0L))
+  expect_equal(f$zoning_code, c(1L, 2L, 0L))                 # 住 → 1、「都市：其他:商業區」→ 2、空白 → 0
+  expect_equal(f$main_ratio, c(38 / 40, 18 / 30, NA))
+})
+
+test_that("使用分區代碼：簡寫、完整寫法、非都市、其他都對得上 (網站和訓練共用)", {
+  expect_equal(zoning_code_of(c("住", "商", "工", "農", "", NA, "非都市", "都市：其他:住宅區", "都市：其他:保護區")),
+               c(1L, 2L, 3L, 4L, 0L, 0L, 0L, 1L, 5L))
+  expect_equal(main_ratio_of(c(30, 0, NA, 90), c(50, 50, 50, 50)), c(0.6, NA, NA, 1.5))   # 超過 1.5 截斷
 })
 
 test_that("clean_trades：同縣市同型態內砍掉最高、最低 1%，坪數範圍外的移除", {
@@ -42,6 +51,11 @@ test_that("to_matrix：欄位順序固定、類別編號不受資料子集影響
   expect_equal(colnames(full), feats)
   expect_equal(sub[1, "district"], full[2, "district"])        # 同一個區，編號一定一樣
   expect_equal(full[1, "floor_num"], c(floor_num = -1))        # 缺值 → -1
+})
+
+test_that("特徵清單：v4 = v3 + 使用分區 + 主建物比例", {
+  expect_equal(setdiff(features_v4, features_v3), c("zoning_code", "main_ratio"))
+  expect_identical(features, features_v4)
 })
 
 test_that("特徵清單：v3 = v2 + 7 個新特徵、沒有重複", {

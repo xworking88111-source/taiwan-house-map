@@ -61,7 +61,7 @@ rules <- tribble(
 # --- 執行 -----------------------------------------------------------------------
 con <- db_connect()
 on.exit(dbDisconnect(con))
-# DQ_SCHEMA：預設檢查正式的 re_v2；測試時可以指向一個「故意弄壞」的 schema，確認檢查真的會擋 (見學習筆記)
+# DQ_SCHEMA：預設檢查正式的 re_v2；測試時可以指向一個「故意弄壞」的 schema，確認檢查真的會擋 (見 docs/技術說明.md「品質保證」)
 schema <- Sys.getenv("DQ_SCHEMA", "re_v2")
 invisible(dbExecute(con, paste0("SET search_path TO ", schema, ";")))
 rules$bad <- vapply(rules$sql, function(q) as.numeric(dbGetQuery(con, q)[[1]]), numeric(1))

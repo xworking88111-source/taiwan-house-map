@@ -33,7 +33,8 @@ load_training_data <- function(schema = "re_v2") {
   fac_sql <- paste0("gf.d_", dist_cols, collapse = ", ")
   cnt_sql <- paste0("gf.n_", count_cols, "_500", collapse = ", ")
   dbGetQuery(con, paste0("
-    SELECT f.addr_key, f.address_norm, f.city, f.district, f.b_category, f.trans_ym,
+    SELECT f.season, f.serial_number, f.addr_key, f.address_norm, f.city, f.district, f.b_category, f.trans_ym,
+           f.zoning, f.main_use, f.note,      -- 實驗 05 (土地使用分區、主要用途) 用
            f.house_age_at_trans, f.pure_house_ping, f.land_ping, f.main_ping,
            f.floor_num, f.total_floors_num, f.rooms, f.halls, f.baths,
            f.has_elevator, f.has_management, f.include_parking, f.parking_price_unknown,
@@ -98,7 +99,10 @@ engineer_features <- function(df) {
     management = as.integer(coalesce(has_management == "有", FALSE)),
     parking    = as.integer(include_parking == "是"),
     parking_unknown = as.integer(parking_price_unknown),
-    city_district = paste0(city, district)
+    city_district = paste0(city, district),
+    # v4 (實驗 05)：使用分區、主建物比例；對應規則在 app/shared_features.R (網站共用)
+    zoning_code = zoning_code_of(zoning),
+    main_ratio  = main_ratio_of(main_ping, pure_house_ping)
   )
 }
 
@@ -130,7 +134,9 @@ features_v2 <- c(features_v1, "nbr_lp", "nbr_n", "nbr_lp_all",
                  paste0("d_", dist_cols), paste0("n_", count_cols, "_500"))
 # v3 新增 (誤差優化實驗，紀錄見 models/experiments.csv)：同棟歷史成交 + 臨路等級
 features_v3 <- c(features_v2, "bld_lp", "bld_n", "bld_dt", "lane_depth", "road_type", "road_class", "d_major_road")
-features <- features_v3                                  # 正式模型目前用的版本
+# v4 新增 (實驗 05)：使用分區 + 主建物比例 (主要用途、建材、土地筆數也試過，沒有幫助)
+features_v4 <- c(features_v3, "zoning_code", "main_ratio")
+features <- features_v4                                  # 正式模型目前用的版本
 
 # --- 6. 模型輸入格式 -----------------------------------------------------------
 # 類別欄位的「level 清單」要固定，訓練、測試、App 預測都用同一份。
@@ -155,7 +161,7 @@ xgb_params <- list(
   objective = "reg:squarederror",
   eta = 0.1,                # 學習率：每棵樹只修正一點點，慢慢逼近 → 比較不會過度擬合
                             # (原本 0.05 + 3000 棵樹，模型在記憶體裡 126MB，免費主機只有 1GB；
-                            #  改 0.1 + 最多 1500 棵，大小約減半，準確度差異見學習筆記)
+                            #  改 0.1 + 最多 1500 棵，大小約減半，準確度差異見 docs/技術說明.md)
   max_depth = 8,            # 每棵樹最多幾層：越深越能抓複雜關係，也越容易過擬合
   subsample = 0.8,          # 每棵樹只用 80% 資料
   colsample_bytree = 0.8,   # 每棵樹只用 80% 欄位
@@ -187,6 +193,6 @@ make_serving_fixture <- function(df, feats, levels, n = 300, seed = 42) {
   set.seed(seed)
   d <- d[sort(sample.int(nrow(d), min(n, nrow(d)))), ]
   list(rows = d %>% select(city, district, address_norm, b_category, house_age_at_trans, pure_house_ping, land_ping,
-                           floor_num, total_floors_num, rooms, baths, parking, elevator, management),
+                           floor_num, total_floors_num, rooms, baths, parking, elevator, management, zoning, main_ping),
        x = to_matrix(d, feats, levels), features = feats, latest = latest, made_at = Sys.time())
 }

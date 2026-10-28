@@ -55,7 +55,7 @@ df_raw <- dbGetQuery(con, paste0("
          f.has_elevator, f.has_management, f.include_parking, f.parking_price_unknown,
          f.pure_house_unit_price_ping, f.pure_house_total_price,
          g.lng, g.lat, g.geo_level, gf.x AS tx, gf.y AS ty, ", fac_sql, ", ", cnt_sql, ",
-         f.note, f.addr_key, f.address_norm, f.is_special_deal
+         f.note, f.addr_key, f.address_norm, f.is_special_deal, f.zoning
   FROM f
   JOIN geo_cache g ON f.addr_key = g.addr_key
   JOIN geo_features gf ON f.addr_key = gf.addr_key

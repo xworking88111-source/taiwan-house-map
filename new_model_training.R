@@ -9,7 +9,7 @@
 #   9. 比較成績    10. 價格區間       11. 存模型、示範預測
 #
 # 每個模型都會用同一套指標評分，你可以清楚看到「為什麼要用比較複雜的模型」。
-# 想看概念說明 (為什麼取 log、什麼是過度擬合...)，請對照 docs/學習筆記.md。
+# 想看概念說明 (為什麼取 log、什麼是過度擬合...)，請對照 docs/技術說明.md。
 # ==============================================================================
 library(ranger)    # 隨機森林 (速度快、支援分位數預測)
 library(xgboost)   # 梯度提升樹 (表格資料競賽最常見的冠軍模型)
@@ -201,6 +201,10 @@ dir.create("models", showWarnings = FALSE)
 model_meta <- list(features = features,
                    price_bounds = as.data.frame(price_bounds(df_raw)),   # 離群值門檻：網站篩選同棟歷史要用同一組
                    # 每種型態「土地持分 ÷ 建物坪數」的合理範圍 (第 1~99 百分位)：網站遇到範圍外的輸入會提醒使用者
+                   # 使用者選「不知道」/ 沒填主建物坪數時的推估值：同 縣市 × 區 × 型態 最常見的分區、主建物比例中位數
+                   impute_tbl = as.data.frame(df %>% group_by(city, district, b_category) %>%
+                     summarise(zoning_mode = as.integer(names(which.max(table(zoning_code)))),
+                               main_ratio_med = median(main_ratio, na.rm = TRUE), .groups = "drop")),
                    land_ratio_range = as.data.frame(df %>% group_by(b_category) %>%
                      summarise(lo = quantile(land_ratio, .01, na.rm = TRUE), hi = quantile(land_ratio, .99, na.rm = TRUE))),
                    factor_levels = fac_levels, t_month_idx_max = max(df$t_month_idx),
@@ -231,7 +235,8 @@ case <- tibble(city = "高雄市", district = "鳳山區", b_category = "透天�
                # 注意要寫 NA_real_ 而不是 NA：單獨的 NA 是「邏輯型」，prep_x() 只會把「數字型」的 NA 填成 -1
                floor_num = NA_real_, total_floors_num = 3, floor_ratio = NA_real_, is_top_floor = 0,
                rooms = 4, baths = 3, elevator = 0, management = 0, parking = 0, parking_unknown = 0,
-               t_month_idx = max(df$t_month_idx), lng = loc$lng, lat = loc$lat)
+               t_month_idx = max(df$t_month_idx), lng = loc$lng, lat = loc$lat,
+               zoning_code = 1L, main_ratio = NA_real_)   # v4：住宅區；主建物比例不知道 (缺值)
 # 空間特徵：和 App 一樣，用 new_features.R 的函數算 (設施距離 + 附近行情)
 case_xy <- lnglat_to_xy(case$lng, case$lat)
 case <- bind_cols(case, facility_features(case_xy, readRDS("geo_data/facilities.rds")),

@@ -27,7 +27,10 @@ x_app <- t(vapply(seq_len(nrow(r)), function(i) {
                            age = r$house_age_at_trans[i], ping = r$pure_house_ping[i], land = r$land_ping[i],
                            floor = r$floor_num[i], total_floors = r$total_floors_num[i],
                            rooms = r$rooms[i], baths = r$baths[i], parking = isTRUE(r$parking[i] == 1),
-                           elevator = r$elevator[i] == 1, management = r$management[i] == 1)
+                           elevator = r$elevator[i] == 1, management = r$management[i] == 1,
+                           # 分區空白 = 非都市土地 (網站的「非都市土地」選項)，不是「不知道」
+                           zoning = if (is.na(r$zoning[i]) || r$zoning[i] == "") "非都市" else r$zoning[i],
+                           main_ping = r$main_ping[i])
   build_model_input(e$inp)[1, ]
 }, numeric(length(fx$features))))
 colnames(x_app) <- fx$features

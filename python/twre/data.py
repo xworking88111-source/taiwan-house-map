@@ -26,7 +26,8 @@ FEATURES_V1 = ["city", "district", "b_category", "house_age_at_trans", "pure_hou
                "t_month_idx", "lng", "lat"]
 FEATURES = FEATURES_V1 + ["nbr_lp", "nbr_n", "nbr_lp_all"] \
     + [f"d_{c}" for c in DIST_COLS] + [f"n_{c}_500" for c in COUNT_COLS] \
-    + ["bld_lp", "bld_n", "bld_dt", "lane_depth", "road_type", "road_class", "d_major_road"]
+    + ["bld_lp", "bld_n", "bld_dt", "lane_depth", "road_type", "road_class", "d_major_road"] \
+    + ["zoning_code", "main_ratio"]                       # v4 (實驗 05)：使用分區、主建物比例
 CATEGORICAL = ["city", "district", "b_category"]
 
 
@@ -42,7 +43,7 @@ def load_training_data(schema: str = "re_v2") -> pd.DataFrame:
     fac_sql = ", ".join(f"gf.d_{c}" for c in DIST_COLS)
     cnt_sql = ", ".join(f"gf.n_{c}_500" for c in COUNT_COLS)
     sql = f"""
-      SELECT f.addr_key, f.address_norm, f.city, f.district, f.b_category, f.trans_ym,
+      SELECT f.addr_key, f.address_norm, f.city, f.district, f.b_category, f.trans_ym, f.zoning,
              f.house_age_at_trans, f.pure_house_ping, f.land_ping, f.main_ping,
              f.floor_num, f.total_floors_num, f.rooms, f.halls, f.baths,
              f.has_elevator, f.has_management, f.include_parking, f.parking_price_unknown,
@@ -87,7 +88,18 @@ def engineer(df: pd.DataFrame) -> pd.DataFrame:
         management=(df["has_management"] == "有").astype(int),
         parking=(df["include_parking"] == "是").astype(float).where(df["include_parking"].notna()),
         parking_unknown=df["parking_price_unknown"].astype(float),
+        zoning_code=zoning_code_of(df["zoning"]),
+        main_ratio=np.where((df["main_ping"] > 0) & (df["pure_house_ping"] > 0),
+                            np.minimum(df["main_ping"] / df["pure_house_ping"], 1.5), np.nan),
     )
+
+
+def zoning_code_of(z: pd.Series) -> np.ndarray:
+    """和 app/shared_features.R 的 zoning_code_of() 相同：0 空白/非都市、1 住、2 商、3 工、4 農、5 其他"""
+    z = pd.Series(z, dtype="string").fillna("")
+    conds = [(z == "") | (z == "非都市"), (z == "住") | z.str.contains("住宅區"), (z == "商") | z.str.contains("商業區"),
+             (z == "工") | z.str.contains("工業區"), (z == "農") | z.str.contains("農業區")]
+    return np.select([c.to_numpy(bool) for c in conds], [0, 1, 2, 3, 4], 5)
 
 
 def to_matrix(df: pd.DataFrame, levels: dict[str, list[str]], features=FEATURES) -> np.ndarray:

@@ -86,11 +86,12 @@ PostgreSQL (schema re_v2)
 
 | 機制 | 檢查什麼 | 失敗時 |
 |---|---|---|
-| 自動化測試（`tests/`，testthat 23 項；`python/tests/`，pytest 7 項） | 特徵函數的規則：不能偷看同月或未來的成交（防資料洩漏）、地址解析、時間窗邊界、和逐筆暴力計算的結果一致 | CI 第一步就停，不下載資料 |
+| 自動化測試（`tests/testthat/`，39 項；`python/tests/`，pytest 7 項） | 特徵函數與共用函式庫的規則：不能偷看同月或未來的成交（防資料洩漏）、地址解析、時間窗邊界、類別編號固定、和逐筆暴力計算的結果一致 | CI 第一步就停，不下載資料 |
 | 資料品質檢查（`new_data_checks.R`，12 條規則） | 完整性（20 季、22 縣市、最新一季筆數）、唯一性、數值範圍、每個門牌都有座標與空間特徵；結果寫進 `re_v2.dq_results` | error 級：停止訓練與部署 |
+| 訓練與網站一致性測試（`tests/serving_consistency.R`） | 300 筆真實成交分別用「訓練算法」和「網站算法」算出 47 個特徵，逐欄比對（training-serving skew） | 不一致 > 2% 就停止部署 |
 | 跳動檢查（`new_model_training.R` §11） | 新模型重估上一版估過的 5,000 間房子，差距中位數 ≤ 5% | 停止部署，網站繼續用上週的模型 |
 
-每個檢查都做過「反向測試」：故意植入資料洩漏 bug、故意弄壞資料（缺一季、重複匯入）、模擬模型異常，確認真的會擋下來。
+一致性測試第一次跑就抓到 3 個真正的不一致（地圖用的座標抖動被拿去估價、透天總樓層、同棟歷史的篩選條件），都已修正。每個檢查都做過「反向測試」：故意植入資料洩漏 bug、故意弄壞資料（缺一季、重複匯入）、模擬模型異常，確認真的會擋下來。
 
 ## Python 版（`python/`）
 
@@ -128,6 +129,16 @@ source("deploy_app.R")            # 部署到 shinyapps.io（需先設定帳號�
 ```
 
 路徑與資料庫連線設定集中在 `config.R`，可以用環境變數覆寫（GitHub Actions 就是這樣用的）。
+
+```bash
+Rscript tests/run_tests.R              # 自動化測試
+Rscript new_data_checks.R              # 資料品質檢查
+Rscript tests/serving_consistency.R    # 訓練與網站一致性測試（需先匯出 App 資料）
+```
+
+**程式結構**：讀資料、清理、特徵工程、模型輸入格式等共用函數集中在 `R/model_lib.R`，訓練、回測、實驗、屋況調整都呼叫同一份；空間特徵函數在 `new_features.R` 和 `app/shared_features.R`（網站也用）。早期的原始版本保留在 `archive/`。
+
+**可重現性**：GitHub Actions 的建置工作固定 R 4.6.1，套件使用 Posit Package Manager 的固定日期快照；Python 套件版本寫死在 `python/requirements.txt`；SQL 固定排序、XGBoost 固定種子 → 同一份資料重訓結果完全一致。
 
 ## 關於我
 

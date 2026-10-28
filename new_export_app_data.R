@@ -113,6 +113,9 @@ if (length(fix) > 0) {
 # 依 addr_key (一棟建物一個 key) 加上固定的小抖動 (約 ±30 公尺)，讓不同建物散開；
 # 同一棟建物的多筆交易仍然在同一個點 → App 上一棟建物 = 一個標記。
 # 這不會讓位置「變準」，只是讓顯示比較清楚；精準度仍以 geo_level 為準。
+# ⚠️ 抖動只能用在「地圖顯示」：估價要用真實座標 (glng / glat)，否則到捷運、學校的距離會和訓練時差幾十公尺
+#    (tests/serving_consistency.R 抓到的 training-serving skew：估價曾經用了抖動後的座標)
+trades <- trades %>% mutate(glng = lng, glat = lat)
 set.seed(2026)
 keys <- unique(na.omit(trades$addr_key))
 jit  <- tibble(addr_key = keys, dx = runif(length(keys), -3e-4, 3e-4), dy = runif(length(keys), -3e-4, 3e-4))
@@ -144,11 +147,11 @@ unlink(list.files("app/data", pattern = "^trades.*\\.rds$", full.names = TRUE)) 
 #      土地、車位：只畫面量圖和統計圖，用不到經緯度、地址 (34 萬筆地號字串很占空間)、屋齡、樓層
 #      成屋、預售交屋：沒有建案名稱、解約
 cols_drop <- list(
-  "土地"     = c("lng", "lat", "geo_level", "address", "age", "floor_num", "total_floors_num", "build_case", "cancelled"),
-  "車位"     = c("lng", "lat", "geo_level", "address", "age", "floor_num", "total_floors_num", "build_case", "cancelled"),
-  "成屋"     = c("build_case", "cancelled"),
+  "土地"     = c("lng", "lat", "glng", "glat", "geo_level", "address", "age", "floor_num", "total_floors_num", "build_case", "cancelled"),
+  "車位"     = c("lng", "lat", "glng", "glat", "geo_level", "address", "age", "floor_num", "total_floors_num", "build_case", "cancelled"),
+  "成屋"     = c("build_case", "cancelled"),                     # glng / glat：估價用的真實座標 (同棟歷史)
   "預售交屋" = c("build_case", "cancelled"),
-  "預售屋"   = character(0))
+  "預售屋"   = c("glng", "glat"))                                # 預售屋不會被拿來當「同棟歷史」，只需要顯示用座標
 for (cc in unique(as.character(trades$category))) {
   d <- trades[trades$category == cc, setdiff(names(trades), cols_drop[[cc]])]
   saveRDS(d, file.path("app/data", paste0("trades_", cc, ".rds")), compress = "xz")
@@ -197,13 +200,15 @@ saveRDS(m, "app/models/price_model.rds")                         # 只剩特徵�
 file.copy("models/nbr_table.rds", "app/data/nbr_table.rds", overwrite = TRUE)
 file.copy("geo_data/facilities.rds", "app/data/facilities.rds", overwrite = TRUE)
 file.copy("models/road_class.rds", "app/data/road_class.rds", overwrite = TRUE)    # 臨路等級 (v3)
+# 一致性測試的標準答案 (部署前 tests/serving_consistency.R 用；不會上傳到網站，見 deploy_app.R 的清單)
+file.copy("models/serving_check.rds", "app/models/serving_check.rds", overwrite = TRUE)
 
 # 最後檢查：App 需要的檔案一個都不能少。
 # file.copy() 在來源檔不存在時「不會報錯」(只回傳 FALSE)，如果不檢查，流程會顯示成功、
 # 但線上 App 一打開就當掉 → 比失敗更糟。所以少任何一個檔案就直接停止。
 required <- c(paste0("app/data/", c("meta.rds", "towns.rds", "road_lookup.rds", "facilities.rds",
                                     "nbr_table.rds", "condition_adjust.rds", "road_class.rds")),
-              paste0("app/models/", c("price_model.rds", "xgb_point.ubj", "xgb_quant.ubj")),
+              paste0("app/models/", c("price_model.rds", "xgb_point.ubj", "xgb_quant.ubj", "serving_check.rds")),
               file.path("app/data", paste0("trades_", c("成屋", "預售屋", "預售交屋", "土地", "車位"), ".rds")))
 missing <- required[!file.exists(required)]
 if (length(missing) > 0) stop("匯出不完整，缺少：", paste(missing, collapse = "、"))

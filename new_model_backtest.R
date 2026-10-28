@@ -22,49 +22,32 @@
 # 這支程式只用 XGBoost (最準、最快)；隨機森林太慢，不適合跑很多次。
 # 執行時間：約 15~30 分鐘
 # ==============================================================================
-library(tidyverse)
 library(xgboost)
 
-# --- 1. 直接沿用訓練程式的「讀資料、清理、特徵工程」---------------------------
-# 不複製程式碼 (複製會造成兩邊不一致)，而是讀取 new_model_training.R，
-# 只執行它的第 1~3 節 (到「# --- 4.」為止)，以及 prep_x / to_matrix 等函數定義。
-source(file.path(Sys.getenv("RE_PROJECT_PATH", "/Volumes/Dzzz_ssd/R所有資料/R_code/Code/All_data"), "config.R"))
+# --- 1. 共用函式庫：讀資料、清理、特徵工程、模型輸入格式 (和訓練程式同一份，見 R/model_lib.R) ---
+source(file.path(Sys.getenv("RE_PROJECT_PATH", "/Volumes/Dzzz_ssd/R所有資料/R_code/Code/All_data"), "R", "model_lib.R"))
 setwd(project_path)
-src <- readLines("new_model_training.R")
-eval(parse(text = src[1:(grep("^# --- 4\\.", src) - 1)]))               # 讀資料、清理、特徵工程 → df
-# 用 R 的語法解析器 parse() 把整個檔案拆成「一個個運算式」，只執行「名稱符合」的賦值。
-# (不能用「到下一個空行為止」來判斷：prep_x 定義後面緊接著隨機森林的訓練程式，會被一起執行)
-exprs <- parse("new_model_training.R")
-take <- function(name) {
-  hit <- Filter(function(e) is.call(e) && identical(e[[1]], as.name("<-")) && identical(e[[2]], as.name(name)), exprs)
-  if (length(hit) == 0) stop("在 new_model_training.R 找不到 ", name)
-  eval(hit[[1]], globalenv())
-}
-for (nm in c("features_v1", "features", "fac_levels", "prep_x", "to_matrix", "xgb_params")) take(nm)
-features_v3 <- features
-v3_new <- c("bld_lp", "bld_n", "bld_dt", "lane_depth", "road_type", "road_class", "d_major_road")
-features_v2 <- setdiff(features_v3, v3_new)
+df <- load_training_data() %>% clean_trades() %>% engineer_features()
+fac_levels <- make_fac_levels(df)
+v3_new <- setdiff(features_v3, features_v2)
 # 臨路等級只和地址、座標有關 (和時間無關) → 算一次就好；同棟歷史和附近行情要依切點重算
-df_base <- bind_cols(df, road_features(str_remove(str_remove(df$address_norm, fixed(df$city)), fixed(df$district)),
-                                       cbind(df$tx, df$ty), build_road_tables()))
+df_base <- add_road_features(df, build_road_tables())
 
 # --- 2. 回測 ------------------------------------------------------------------
 ape_store <- list()      # 每次回測每一筆測試資料的誤差，留著算 v2 vs v3 的配對 bootstrap
 backtest_one <- function(cut, test_len, train_months = Inf, feature_set = "v2") {
   # 附近行情、同棟歷史要「每個切點重算」：時間窗最多只能用到切點 (切點之後的成交在上線當下還不存在)
-  df <- bind_cols(df_base, neighbor_price(df_base$tx, df_base$ty, as.character(df_base$b_category),
-                                          df_base$t_month_idx, df_base$y, cap_month = cut),
-                  building_history(df_base$addr_key, df_base$t_month_idx, df_base$y, cap_month = cut))
-  features <<- switch(feature_set, v1 = features_v1, v2 = features_v2, v3 = features_v3)  # prep_x() 讀全域的 features
+  df <- add_history_features(df_base, cap_month = cut)
+  feats <- switch(feature_set, v1 = features_v1, v2 = features_v2, v3 = features_v3)
   train <- df %>% filter(t_month_idx <= cut, t_month_idx > cut - train_months)
   test  <- df %>% filter(t_month_idx > cut, t_month_idx <= cut + test_len)
   # 訓練集最後 3 個月當驗證集 (early stopping 用)
   valid_idx <- train$t_month_idx > (cut - 3)
-  dtrain <- xgb.DMatrix(to_matrix(train[!valid_idx, ]), label = train$y[!valid_idx])
-  dvalid <- xgb.DMatrix(to_matrix(train[valid_idx, ]),  label = train$y[valid_idx])
+  dtrain <- xgb.DMatrix(to_matrix(train[!valid_idx, ], feats, fac_levels), label = train$y[!valid_idx])
+  dvalid <- xgb.DMatrix(to_matrix(train[valid_idx, ], feats, fac_levels),  label = train$y[valid_idx])
   fit <- xgb.train(params = xgb_params, data = dtrain, nrounds = 3000,
                    evals = list(valid = dvalid), early_stopping_rounds = 100, verbose = 0)
-  pred <- predict(fit, to_matrix(test))
+  pred <- predict(fit, to_matrix(test, feats, fac_levels))
   ape <- abs(exp(pred) - exp(test$y)) / exp(test$y)
   ape_store[[paste(feature_set, cut, test_len)]] <<- ape
   by_type <- tapply(ape, as.character(test$b_category), mean)

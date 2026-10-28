@@ -117,6 +117,37 @@ filter_trades <- function(category, city, district, type_sel, year_rng, age_rng 
   d
 }
 
+# --- 3a. 使用者輸入 → 估價需要的全部資訊 (定位 + 所有特徵) ------------------------------
+# 為什麼要從 server 裡搬出來？
+#   寫在 eventReactive() 裡面時，只有「按下網頁按鈕」才能執行，測試程式呼叫不到。
+#   抽成一般函數後，tests/serving_consistency.R 可以直接餵它「真實成交的條件」，
+#   檢查網站算出的特徵和訓練時算的一不一樣 (training-serving skew 測試)
+make_estimate_input <- function(city, district, road, type, age, ping, land, floor, total_floors,
+                                rooms, baths, parking, elevator, management) {
+  loc <- locate_address(city, district, road)
+  is_house <- type == "透天厝"
+  # 土地持分：有填就用；沒填就用同區同型態的中位數比例推估 (見 impute_land_ratio 的說明)
+  land_given <- !is.na(land) && land > 0
+  inp <- list(
+    city = city, district = district, road = road %||% "",
+    type = type, age = age, ping = ping,
+    land = if (land_given) land else impute_land_ratio(city, district, type) * ping,
+    land_imputed = !land_given,
+    floor = if (is_house) NA_real_ else floor,
+    total_floors = total_floors,      # 透天也要給 (舊版給 NA：一致性測試抓到的 skew，訓練時透天有總樓層)
+    rooms = rooms, baths = baths,
+    parking = parking, elevator = elevator, management = management,
+    lng = loc$lng, lat = loc$lat
+  )
+  xy <- lnglat_to_xy(inp$lng, inp$lat)
+  inp$geo <- facility_features(xy, facilities)                    # 21 個設施距離 / 數量
+  inp$nbr <- lookup_nbr(nbr_tbl, xy[1], xy[2], inp$type)           # 附近約 500 公尺、近 12 個月的同型態行情
+  inp$bld <- building_features(loc$history)                       # 同棟過去 36 個月的成交
+  # ⚠️ 不能叫 inp$road：inp$road 已經是「使用者輸入的地址文字」(AI 提示詞會用到)，同名會互相覆蓋
+  inp$road_feat <- road_features(loc$rest, xy, road_tbl)          # 巷弄深度、道路等級、到主要道路距離
+  list(inp = inp, loc = loc)
+}
+
 # --- 3. 估價：把使用者輸入轉成模型看得懂的格式 ---------------------------------
 # 這段必須和 new_model_training.R 的 prep_x() / to_matrix() 完全一致：
 # 欄位順序、類別編號 (factor levels)、缺值填 -1。不一致時模型會「看錯欄位」而不會報錯，非常危險。
@@ -160,7 +191,19 @@ building_features <- function(h, ref_month = model$t_month_idx_max, window = 36)
   none <- data.frame(bld_lp = NA_real_, bld_n = 0L, bld_dt = NA_real_)
   if (is.null(h) || nrow(h) == 0) return(none)
   m <- (as.integer(format(h$trans_ym, "%Y")) - 2020) * 12 + as.integer(format(h$trans_ym, "%m"))
-  ok <- h$category == "成屋" & !is.na(h$unit_wan) & h$unit_wan > 0 & m >= ref_month - window & m <= ref_month - 1
+  # 篩選條件要和訓練資料一樣 (R/model_lib.R 的 load_training_data + clean_trades)：
+  #   屋齡已知且 <= 70 年 (排除「年份不明成屋」)、坪數 5~300、住宅型態
+  #   (一致性測試抓到：舊版把年份不明成屋也算進同棟歷史，訓練時卻沒有 → 6% 的房子對不上)
+  ok <- h$category == "成屋" & !is.na(h$unit_wan) & h$unit_wan > 0 & m >= ref_month - window & m <= ref_month - 1 &
+        !is.na(h$age) & h$age <= 70 & h$ping >= 5 & h$ping <= 300 &
+        h$b_category %in% c("透天厝", "電梯大樓", "華廈", "公寓", "套房")
+  # 離群值門檻 (每個縣市 × 型態的單價第 1、99 百分位)：訓練時存在模型資訊裡，網站用同一組
+  pb <- model$price_bounds
+  if (!is.null(pb)) {
+    j <- match(paste(h$city, h$b_category), paste(pb$city, pb$b_category))
+    p <- h$unit_wan * 1e4
+    ok <- ok & !is.na(j) & p >= pb$lo[j] - 50 & p <= pb$hi[j] + 50   # ±50 元：匯出時單價四捨五入到百元
+  }
   if (!any(ok)) return(none)
   data.frame(bld_lp = mean(log(h$unit_wan[ok] * 1e4)), bld_n = sum(ok), bld_dt = mean(ref_month - m[ok]))
 }
@@ -210,6 +253,7 @@ locate_address <- function(city, district, text) {
   a <- chartr("０１２３４５６７８９－", "0123456789-", text)
   a <- gsub("台", "臺", gsub("巿", "市", gsub("\\s", "", a)))
   a <- sub(paste0("^", city), "", a); a <- sub(paste0("^", district), "", a)
+  a_raw <- a                                              # 去掉村里之前的版本 (找同棟紀錄用，見下面)
   a <- sub("^[^0-9路街道巷弄段]{1,4}[村里](?=\\d+鄰|[^0-9]+(路|街|大道|巷))", "", a, perl = TRUE)
   a <- sub("^\\d+鄰", "", a)
   # 「4段」→「四段」(OSM 路名和實價登錄都用國字)
@@ -218,13 +262,17 @@ locate_address <- function(city, district, text) {
   bld <- sub("(號).*$", "\\1", a)                         # 去掉樓層：「100號三樓」→「100號」
   # (2) 同一棟建物的歷史成交
   if (grepl("號$", bld)) {
-    key <- paste0(city, district, bld)
+    # 資料庫的門牌代碼 (addr_key) 有些含村里 (例：永康區鹽行里正南五街289巷98號)、有些沒有
+    # → 兩種寫法都試。只用去掉村里的版本會找不到這棟 (一致性測試抓到：8% 的房子同棟歷史對不上)
+    for (k in names(cn_digit)) a_raw <- gsub(paste0(k, "段"), paste0(cn_digit[k], "段"), a_raw, fixed = TRUE)
+    key <- unique(paste0(city, district, c(bld, sub("(號).*$", "\\1", a_raw))))
     # address 欄位就是建物門牌 (匯出時已經把樓層拿掉，見 new_export_app_data.R)
     h <- rbind(trades_by_cat[["成屋"]][trades_by_cat[["成屋"]]$address %in% key, ],
                trades_by_cat[["預售交屋"]][trades_by_cat[["預售交屋"]]$address %in% key, ])
     if (nrow(h) > 0) {
       h <- h[order(h$trans_ym, decreasing = TRUE), ]
-      return(list(lng = h$lng[1], lat = h$lat[1], level = "這棟建物 (資料庫有成交紀錄)", label = bld, history = h, rest = a))
+      # glng / glat = 真實座標 (lng / lat 是地圖顯示用、加了 ±30 公尺抖動的版本，見 new_export_app_data.R)
+      return(list(lng = h$glng[1], lat = h$glat[1], level = "這棟建物 (資料庫有成交紀錄)", label = bld, history = h, rest = a))
     }
   }
   # (3) 巷弄 / 路段
@@ -452,9 +500,9 @@ ui <- page_navbar(
         ),
         numericInput("p_land", "土地持分坪數 (選填)", 30, min = 0, max = 500),
         div(class = "small-note mb-2", "不知道可以留空，系統會用同區、同型態的中位數推估。"),
-        conditionalPanel("input.p_type != '透天厝'",
-                         layout_columns(numericInput("p_floor", "所在樓層", 8, min = 1, max = 90),
-                                        numericInput("p_tfloor", "總樓層", 15, min = 1, max = 90))),
+        # 透天只有「總樓層」(整棟都是自己的，沒有所在樓層)；訓練資料裡 97% 的透天都有總樓層，模型會用到
+        layout_columns(conditionalPanel("input.p_type != '透天厝'", numericInput("p_floor", "所在樓層", 8, min = 1, max = 90)),
+                       numericInput("p_tfloor", "總樓層", 3, min = 1, max = 90)),
         layout_columns(numericInput("p_rooms", "房", 3, min = 0, max = 20),
                        numericInput("p_baths", "衛", 2, min = 0, max = 20)),
         checkboxInput("p_parking", "含車位", FALSE),
@@ -909,32 +957,17 @@ server <- function(input, output, session) {
   # 切換建物型態：透天厝預設 30 坪土地；其他型態清空 (多數人不知道持分 → 用推估值)
   observeEvent(input$p_type, {
     updateNumericInput(session, "p_land", value = if (input$p_type == "透天厝") 30 else NA)
+    updateNumericInput(session, "p_tfloor", value = if (input$p_type == "透天厝") 3 else 15)   # 透天常見 3 層
   }, ignoreInit = TRUE)
   # eventReactive：只有按下「開始估價」才計算 (不是每改一個輸入就重算)
   est <- eventReactive(input$p_go, {
-    loc <- locate_address(input$p_city, input$p_district, input$p_road)
-    is_house <- input$p_type == "透天厝"
-    # 土地持分：有填就用；沒填就用同區同型態的中位數比例推估 (見 impute_land_ratio 的說明)
-    land_ratio <- impute_land_ratio(input$p_city, input$p_district, input$p_type)
-    land_given <- !is.na(input$p_land) && input$p_land > 0
-    inp <- list(
-      city = input$p_city, district = input$p_district, road = input$p_road %||% "",
-      type = input$p_type, age = input$p_age, ping = input$p_ping,
-      land = if (land_given) input$p_land else land_ratio * input$p_ping,
-      land_imputed = !land_given,
-      floor = if (is_house) NA_real_ else input$p_floor,
-      total_floors = if (is_house) NA_real_ else input$p_tfloor,
-      rooms = input$p_rooms, baths = input$p_baths,
-      parking = input$p_parking, elevator = input$p_elevator, management = input$p_mgmt,
-      lng = loc$lng, lat = loc$lat
-    )
-    validate(need(!is.na(inp$age) && !is.na(inp$ping) && inp$ping > 0, "請輸入屋齡與坪數"))
-    xy <- lnglat_to_xy(inp$lng, inp$lat)
-    inp$geo <- facility_features(xy, facilities)                    # 21 個設施距離 / 數量
-    inp$nbr <- lookup_nbr(nbr_tbl, xy[1], xy[2], inp$type)           # 附近約 500 公尺、近 12 個月的同型態行情
-    inp$bld <- building_features(loc$history)                       # 同棟過去 36 個月的成交
-    # ⚠️ 不能叫 inp$road：inp$road 已經是「使用者輸入的地址文字」(AI 提示詞會用到)，同名會互相覆蓋
-    inp$road_feat <- road_features(loc$rest, xy, road_tbl)          # 巷弄深度、道路等級、到主要道路距離
+    validate(need(!is.na(input$p_age) && !is.na(input$p_ping) && input$p_ping > 0, "請輸入屋齡與坪數"))
+    e <- make_estimate_input(city = input$p_city, district = input$p_district, road = input$p_road %||% "",
+                             type = input$p_type, age = input$p_age, ping = input$p_ping, land = input$p_land,
+                             floor = input$p_floor, total_floors = input$p_tfloor,
+                             rooms = input$p_rooms, baths = input$p_baths, parking = input$p_parking,
+                             elevator = input$p_elevator, management = input$p_mgmt)
+    inp <- e$inp; loc <- e$loc
     pred  <- predict_price(inp)
     comps <- find_comparables(inp)
     list(inp = inp, pred = pred, comps = comps, loc = loc)

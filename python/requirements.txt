@@ -1,10 +1,18 @@
 # Python 版估價模型需要的套件 (安裝：python -m venv .venv && .venv/bin/pip install -r requirements.txt)
-pandas>=2.2
-numpy>=2.0
-xgboost>=3.0
-scikit-learn>=1.5
-psycopg[binary]>=3.2
-geopandas>=1.0
-scipy>=1.13
-pyarrow>=16
-pytest>=8
+#
+# 為什麼寫死版本 (==)？
+#   寫 >= 的話，每次安裝都會拿到「最新版」：哪天 pandas 或 XGBoost 改版，同一份程式可能算出不同結果、甚至壞掉。
+#   寫死版本 = 任何人、任何時間安裝，都拿到「驗證過」的同一組套件 (可重現性 reproducibility)。
+#   要升級時：改版本號 → 跑 pytest 和 train.py → 成績沒變差才 commit。
+# 這些版本在 2026-10-28 驗證過：pytest 全過、train.py MAPE 12.0% (和 R 版一致)
+pandas==3.1.0
+numpy==2.5.4
+xgboost==3.4.1
+scikit-learn==1.9.1
+psycopg[binary]==3.3.6
+geopandas==1.2.0
+shapely==2.2.0
+pyogrio==0.13.0
+scipy==1.18.1
+pyarrow==26.0.0
+pytest==9.2.0

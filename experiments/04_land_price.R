@@ -16,8 +16,9 @@
 source(file.path(Sys.getenv("RE_PROJECT_PATH", "/Volumes/Dzzz_ssd/R所有資料/R_code/Code/All_data"), "new_model_experiments.R"))
 library(data.table)
 t0 <- Sys.time()
-eval(parse(text = readLines("experiments/03_road_class.R") %>%            # 沿用實驗 03 的臨路特徵計算 (第 1、2 段)
-             { .[grep("^# --- 1\\. 地址文字", .):(grep("^# 檢查：特徵和單價", .) - 1)] }))
+# 臨路等級：用正式版的函數 (R/model_lib.R 的 add_road_features；實驗 03 驗證後整合進正式模型的版本)
+# (舊版這裡用 eval(parse()) 執行實驗 03 程式的片段，重構時改掉：實驗 03 的標題一改，這裡就會壞)
+df <- add_road_features(df, build_road_tables())
 
 # --- 通用工具：「某個區域 key、某段時間窗」的 log 平均 ------------------------------
 # src_*：用來算行情的成交 (key, 月份, log 值)；q_*：要查詢的列 (key, 查詢月份, 列編號 id)

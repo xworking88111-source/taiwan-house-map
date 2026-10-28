@@ -71,10 +71,15 @@ jobs:
           run-id: ${{ inputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # 舊的建置產物 (2026-10-28 以前) 沒有標準答案檔 → 略過；新的一定要通過
+      - name: 訓練與網站一致性測試
+        run: |
+          if [ -f app/models/serving_check.rds ]; then Rscript tests/serving_consistency.R
+          else echo "這次的建置產物沒有 serving_check.rds (舊版)，略過一致性測試"; fi
+
       - name: 部署到 shinyapps.io
         env:
           SHINYAPPS_NAME: ${{ secrets.SHINYAPPS_NAME }}
           SHINYAPPS_TOKEN: ${{ secrets.SHINYAPPS_TOKEN }}
           SHINYAPPS_SECRET: ${{ secrets.SHINYAPPS_SECRET }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: Rscript deploy_app.R

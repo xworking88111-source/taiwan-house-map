@@ -18,19 +18,14 @@
 # 產出：models/condition_adjust.csv (給人看)、app/data/condition_adjust.rds (App 用)
 # 執行時間：約 10 分鐘
 # ==============================================================================
-library(tidyverse)
 library(xgboost)
-library(DBI)
-library(RPostgres)
-
-source(file.path(Sys.getenv("RE_PROJECT_PATH", "/Volumes/Dzzz_ssd/R所有資料/R_code/Code/All_data"), "config.R"))
+# 共用函式庫：清理、特徵工程、特徵清單、XGBoost 參數 (和訓練程式同一份，見 R/model_lib.R)
+source(file.path(Sys.getenv("RE_PROJECT_PATH", "/Volumes/Dzzz_ssd/R所有資料/R_code/Code/All_data"), "R", "model_lib.R"))
 setwd(project_path)
 # 輸出用的資料夾先建好。app/data 在 .gitignore 裡，GitHub Actions 的乾淨主機上一開始不存在
 # (第一次在雲端跑時，就是因為這裡沒建資料夾而失敗；本機剛好已經有這個資料夾，所以沒發現)
 dir.create("models", showWarnings = FALSE)
 dir.create("app/data", recursive = TRUE, showWarnings = FALSE)
-options(features.as_library = TRUE)
-source("new_features.R")
 set.seed(2026)
 
 # --- 1. 讀資料：一般交易 + 凶宅/海砂屋 (含備註) --------------------------------
@@ -69,21 +64,11 @@ df_raw <- dbGetQuery(con, paste0("
     AND f.house_age_at_trans IS NOT NULL AND g.geo_level <> 'none';")) %>% as_tibble()
 dbDisconnect(con)
 
-# --- 2. 沿用訓練程式的「清理、特徵工程」(第 2、3 節)，不複製程式碼 ----------------------
-src <- readLines("new_model_training.R")
-i <- grep("^# --- 2\\.", src); j <- grep("^# --- 4\\.", src) - 1
-eval(parse(text = src[i:j]))                                  # 產生 df (含 y = log 單價)
-exprs <- parse("new_model_training.R")
-take <- function(name) {
-  hit <- Filter(function(e) is.call(e) && identical(e[[1]], as.name("<-")) && identical(e[[2]], as.name(name)), exprs)
-  eval(hit[[1]], globalenv())
-}
-for (nm in c("features_v1", "features", "fac_levels", "prep_x", "to_matrix", "xgb_params")) take(nm)
-df <- bind_cols(df, neighbor_price(df$tx, df$ty, as.character(df$b_category), df$t_month_idx, df$y))
-# v3 特徵 (同棟歷史 + 臨路等級)：features 清單是從訓練程式拿的，這裡必須算出同樣的欄位，否則 prep_x() 會找不到欄位
-df <- bind_cols(df, building_history(df$addr_key, df$t_month_idx, df$y),
-                road_features(str_remove(str_remove(df$address_norm, fixed(df$city)), fixed(df$district)),
-                              cbind(df$tx, df$ty), build_road_tables()))
+# --- 2. 清理、特徵工程：呼叫共用函式庫 (和訓練程式同一套規則) ------------------------------
+df <- df_raw %>% clean_trades() %>% engineer_features()      # 產生 y = log 單價等欄位
+fac_levels <- make_fac_levels(df)
+# 交叉預測不模擬「上線當下」→ cap_month = Inf；臨路等級和時間無關
+df <- df %>% add_history_features(cap_month = Inf) %>% add_road_features(build_road_tables())
 
 # --- 3. 備註關鍵字分組 ------------------------------------------------------------
 # 一筆交易可能同時屬於多組 (例如含裝潢 + 帶租約)，所以每組各自一個 TRUE/FALSE 欄位
@@ -117,11 +102,11 @@ for (k in 1:3) {
   tr <- df %>% filter(fold != k, is_special_deal == "否")
   va <- runif(nrow(tr)) < 0.05                                 # 5% 當驗證集 (early stopping)
   fit <- xgb.train(params = xgb_params,
-                   data = xgb.DMatrix(to_matrix(tr[!va, ]), label = tr$y[!va]), nrounds = 3000,
-                   evals = list(valid = xgb.DMatrix(to_matrix(tr[va, ]), label = tr$y[va])),
+                   data = xgb.DMatrix(to_matrix(tr[!va, ], features, fac_levels), label = tr$y[!va]), nrounds = 3000,
+                   evals = list(valid = xgb.DMatrix(to_matrix(tr[va, ], features, fac_levels), label = tr$y[va])),
                    early_stopping_rounds = 100, verbose = 0)
   idx <- which(df$fold == k)
-  df$pred[idx] <- predict(fit, to_matrix(df[idx, ]))
+  df$pred[idx] <- predict(fit, to_matrix(df[idx, ], features, fac_levels))
   message(">> 第 ", k, " 份完成 (樹的數量 ", xgb.attr(fit, "best_iteration"), ")")
 }
 df$resid <- exp(df$y) / exp(df$pred) - 1                      # 實際 / 預測 - 1

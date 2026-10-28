@@ -11,91 +11,21 @@
 # 每個模型都會用同一套指標評分，你可以清楚看到「為什麼要用比較複雜的模型」。
 # 想看概念說明 (為什麼取 log、什麼是過度擬合...)，請對照 docs/學習筆記.md。
 # ==============================================================================
-library(tidyverse)
-library(DBI)
-library(RPostgres)
 library(ranger)    # 隨機森林 (速度快、支援分位數預測)
 library(xgboost)   # 梯度提升樹 (表格資料競賽最常見的冠軍模型)
 
-# 共用設定 (路徑、資料庫連線)：本機和 GitHub Actions 都用同一份程式
-source(file.path(Sys.getenv("RE_PROJECT_PATH", "/Volumes/Dzzz_ssd/R所有資料/R_code/Code/All_data"), "config.R"))
+# 共用函式庫：讀資料、清理、特徵工程、模型輸入格式、XGBoost 參數 (訓練、回測、實驗、屋況調整共用同一份)
+# 也會載入 config.R (路徑、資料庫連線) 和 new_features.R (空間特徵函數)
+source(file.path(Sys.getenv("RE_PROJECT_PATH", "/Volumes/Dzzz_ssd/R所有資料/R_code/Code/All_data"), "R", "model_lib.R"))
 setwd(project_path)
-# 空間特徵的函數 (設施距離、附近行情) 都寫在 new_features.R，訓練、回測、App 共用同一份。
-# features.as_library = TRUE：只載入函數，不要執行 new_features.R 的主程式
-options(features.as_library = TRUE)
-source("new_features.R")
 set.seed(42)       # 固定亂數種子：每次執行結果都一樣，才能比較「改了什麼造成差異」
 
-# --- 1. 讀資料 ----------------------------------------------------------------
-# 從資料庫拿「成屋 + 非特殊交易」的子表，並接上經緯度。
-# 這段 SQL 就是資料工程 (ETL) 和資料科學 (模型) 的交界：模型只吃乾淨的資料。
-load_training_data <- function(schema = "re_v2") {
-  con <- db_connect()
-  on.exit(dbDisconnect(con))                 # 函數結束時一定會關連線 (就算中途出錯)
-  dbExecute(con, paste0("SET search_path TO ", schema, ";"))
-  # 設施特徵欄位名稱由 new_features.R 定義 (dist_cols / count_cols)，這裡自動組成 SQL
-  fac_sql <- paste0("gf.d_", dist_cols, collapse = ", ")
-  cnt_sql <- paste0("gf.n_", count_cols, "_500", collapse = ", ")
-  dbGetQuery(con, paste0("
-    SELECT f.addr_key, f.address_norm, f.city, f.district, f.b_category, f.trans_ym,
-           f.house_age_at_trans, f.pure_house_ping, f.land_ping, f.main_ping,
-           f.floor_num, f.total_floors_num, f.rooms, f.halls, f.baths,
-           f.has_elevator, f.has_management, f.include_parking, f.parking_price_unknown,
-           f.pure_house_unit_price_ping, f.pure_house_total_price,
-           g.lng, g.lat, g.geo_level,
-           gf.x AS tx, gf.y AS ty,          -- TWD97 公尺座標 (改名避免和目標變數 y 撞名)
-           ", fac_sql, ", ", cnt_sql, "
-    FROM fact_residential_house f
-    JOIN geo_cache g ON f.addr_key = g.addr_key
-    JOIN geo_features gf ON f.addr_key = gf.addr_key   -- 設施距離 (特徵庫，見 new_features.R)
-    WHERE f.b_category IN ('透天厝', '電梯大樓', '華廈', '公寓', '套房')
-      AND f.house_age_at_trans IS NOT NULL
-      AND g.geo_level <> 'none'
-    -- 固定排序：SQL 沒寫 ORDER BY 時，資料庫回傳的順序「不保證」每次一樣。
-    -- 順序一變，XGBoost 隨機抽樣抽到的就是不同的房子 → 就算固定種子，模型也不一樣 (估價跳動的隱藏原因)
-    ORDER BY f.season, f.serial_number;")) %>% as_tibble()
-}
+# --- 1~3. 讀資料 → 清理離群值 → 特徵工程 (函數定義與說明見 R/model_lib.R) -----------------
 if (!exists("df_raw")) df_raw <- load_training_data()
 message("讀入 ", nrow(df_raw), " 筆")
-
-# --- 2. 清理離群值 ------------------------------------------------------------
-# 實價登錄有很多「怪交易」沒寫在備註：例如 1 坪 1 萬的透天 (其實是持分)、
-# 或 1 坪 500 萬的豪宅頂樓。這些點會把模型往奇怪的方向拉。
-# 做法：在「同縣市 + 同建物型態」裡，砍掉單價最低 1% 和最高 1%。
-# 為什麼分組砍？台北的 1% 低價可能是台東的正常價，不能全台一起砍。
-df <- df_raw %>%
-  filter(!is.na(trans_ym),                                      # 交易月份無效 (例如 13 月) 的少數資料：
-                                                                # 留著會讓 max() 變成 NA，時間切分整個失效
-         pure_house_ping >= 5, pure_house_ping <= 300,          # 5 坪以下多半是車位/持分
-         house_age_at_trans <= 70) %>%
-  group_by(city, b_category) %>%
-  filter(between(pure_house_unit_price_ping,
-                 quantile(pure_house_unit_price_ping, 0.01),
-                 quantile(pure_house_unit_price_ping, 0.99))) %>%
-  ungroup()
+df <- clean_trades(df_raw)
 message("清理後 ", nrow(df), " 筆 (移除 ", nrow(df_raw) - nrow(df), " 筆)")
-
-# --- 3. 特徵工程 (Feature Engineering) ----------------------------------------
-# 「特徵」= 模型看得到的欄位。好的特徵往往比換模型更有效。
-df <- df %>% mutate(
-  # 目標變數取 log：房價是「右偏」分布 (少數極貴)，取 log 後接近常態，
-  # 而且模型的誤差會變成「百分比誤差」→ 1000 萬的房子差 10% 和 300 萬差 10% 一樣重要
-  y = log(pure_house_unit_price_ping),
-  # 時間趨勢：交易月份換成「距離 2020-01 幾個月」，讓模型學到房價逐月上漲
-  t_month_idx = (as.integer(format(as.Date(trans_ym), "%Y")) - 2020) * 12 +
-                as.integer(format(as.Date(trans_ym), "%m")),
-  # 樓層比：同樣 10 樓，在 10 層樓的頂樓 vs 在 30 層樓的中間，價值不同
-  floor_ratio = if_else(!is.na(floor_num) & total_floors_num > 0, floor_num / total_floors_num, NA_real_),
-  is_top_floor = as.integer(!is.na(floor_num) & floor_num == total_floors_num),
-  # 土地坪數 / 建物坪數：透天厝的土地比例高 = 比較值錢
-  land_ratio = if_else(pure_house_ping > 0, land_ping / pure_house_ping, NA_real_),
-  # coalesce(..., FALSE)：原始資料這兩欄有空值，NA == "有" 會得到 NA，線性迴歸遇到 NA 就預測不出來
-  elevator   = as.integer(coalesce(has_elevator == "有", FALSE)),
-  management = as.integer(coalesce(has_management == "有", FALSE)),
-  parking    = as.integer(include_parking == "是"),
-  parking_unknown = as.integer(parking_price_unknown),
-  city_district = paste0(city, district)
-)
+df <- engineer_features(df)
 
 # --- 4. 切訓練集 / 測試集：用「時間」切，不是隨機切 ----------------------------
 # 為什麼？我們的 App 是用「過去的成交」預測「現在/未來」的房價。
@@ -103,22 +33,16 @@ df <- df %>% mutate(
 # 模型等於偷看答案 (資料洩漏 data leakage)，分數會好看但上線就破功。
 cut_month <- max(df$t_month_idx) - 6                     # 最近 6 個月當測試集
 
-# 附近行情 (新特徵，定義見 new_features.R 的 neighbor_price)：
-#   附近約 500 公尺、同型態、交易月份「之前」12 個月的成交行情。
+# 和切點有關的特徵 (定義見 R/model_lib.R 的 add_history_features)：
+#   附近行情：附近約 500 公尺、同型態、交易月份「之前」12 個月的成交行情
+#   同棟歷史：同門牌過去 36 個月的成交行情 (v3，實驗 02)
 #   cap_month = cut_month：測試期的交易在上線當下還不存在，時間窗最多只能用到切點，否則就是偷看答案
-df <- bind_cols(df %>% select(-any_of(c("nbr_lp", "nbr_n", "nbr_lp_all"))),
-                neighbor_price(df$tx, df$ty, as.character(df$b_category), df$t_month_idx, df$y, cap_month = cut_month))
-message("附近行情：", scales::percent(mean(!is.na(df$nbr_lp)), 0.1), " 的交易附近有足夠的同型態成交")
-
-# 同棟歷史成交 (v3 新特徵，實驗 02)：同門牌過去 36 個月的成交行情。定義見 new_features.R 的 building_history()
-df <- bind_cols(df %>% select(-any_of(c("bld_lp", "bld_n", "bld_dt"))),
-                building_history(df$addr_key, df$t_month_idx, df$y, cap_month = cut_month))
-# 臨路等級 (v3 新特徵，實驗 03)：巷弄深度、路名尾字、道路等級、到主要道路距離。定義見 app/shared_features.R
+df <- add_history_features(df, cap_month = cut_month)
+# 臨路等級 (v3，實驗 03)：巷弄深度、路名尾字、道路等級、到主要道路距離。定義見 app/shared_features.R
 road_tbl <- build_road_tables()
-df <- bind_cols(df %>% select(-any_of(c("lane_depth", "road_type", "road_class", "d_major_road"))),
-                road_features(str_remove(str_remove(df$address_norm, fixed(df$city)), fixed(df$district)),
-                              cbind(df$tx, df$ty), road_tbl))
-message("同棟歷史：", scales::percent(mean(df$bld_n > 0), 0.1), " 有同棟紀錄；道路等級對到 ",
+df <- add_road_features(df, road_tbl)
+message("附近行情：", scales::percent(mean(!is.na(df$nbr_lp)), 0.1), " 的交易附近有足夠的同型態成交；",
+        "同棟歷史：", scales::percent(mean(df$bld_n > 0), 0.1), " 有同棟紀錄；道路等級對到 ",
         scales::percent(mean(!is.na(df$road_class)), 0.1))
 train <- df %>% filter(t_month_idx <= cut_month)
 test  <- df %>% filter(t_month_idx >  cut_month)
@@ -166,74 +90,39 @@ print(summary(lm_fit)$coefficients[!grepl("city_district", names(coef(lm_fit))),
 # 概念：種幾百棵「決策樹」，每棵樹只看部分資料、部分欄位，最後投票 (平均)。
 # 優點：自動抓非線性和交互作用 (例如「台北的屋齡」和「台東的屋齡」影響不同)，
 #       不太需要調參數；用經緯度當特徵，就能學到「哪一塊地比較貴」。
-features_v1 <- c("city", "district", "b_category", "house_age_at_trans", "pure_house_ping",
-                 "land_ratio", "floor_num", "total_floors_num", "floor_ratio", "is_top_floor",
-                 "rooms", "baths", "elevator", "management", "parking", "parking_unknown",
-                 "t_month_idx", "lng", "lat")
-# v2 新增：附近行情 + 交通 (捷運、輕軌、台鐵、高鐵、機場、公車) + 嫌惡設施 + 生活機能
-features <- c(features_v1, "nbr_lp", "nbr_n", "nbr_lp_all",
-              paste0("d_", dist_cols), paste0("n_", count_cols, "_500"),
-              # v3 新增 (誤差優化實驗，紀錄見 models/experiments.csv)：同棟歷史成交 + 臨路等級
-              "bld_lp", "bld_n", "bld_dt", "lane_depth", "road_type", "road_class", "d_major_road")
+# 特徵清單 (features_v1 / v2 / v3) 和 prep_x() 定義在 R/model_lib.R；features = 正式模型用的 v3
+# 類別欄位的編號表 (city、district、b_category) 要固定，訓練、測試、App 預測都用同一份 (說明見函式庫)
+fac_levels <- make_fac_levels(df)
 
-# 類別欄位的「level 清單」要固定，訓練、測試、App 預測都用同一份。
-# ⚠️ 舊版這裡寫 as.factor()：測試集少了某些區時，levels 會變短，
-#    轉成整數編號後「鳳山區」在訓練集是 152 號、在測試集可能變成 140 號 → XGBoost 看錯區！
-#    (隨機森林用名稱對應不受影響，這也是當初 XGBoost 分數輸給隨機森林的原因之一)
-fac_levels <- map(df[c("city", "district", "b_category")], ~ sort(unique(as.character(.x))))
-
-prep_x <- function(d) {
-  d %>% select(all_of(features)) %>%
-    mutate(across(c(city, district, b_category), ~ factor(.x, levels = fac_levels[[cur_column()]])),
-           across(where(is.numeric), ~ replace_na(.x, -1)))   # 樹模型可以把 -1 當成「缺值」這個類別
-}
 # 資料太大時先抽樣，學習階段跑得快比較重要；正式版再用全部資料
 train_rf <- if (nrow(train) > 300000) slice_sample(train, n = 300000) else train
 rf_fit <- ranger(
-  x = prep_x(train_rf), y = train_rf$y,
+  x = prep_x(train_rf, features, fac_levels), y = train_rf$y,
   num.trees = 300,          # 樹的數量：越多越穩定，但超過 300~500 通常就沒什麼進步
   min.node.size = 10,       # 每片葉子至少 10 筆：避免記住個別交易 (過度擬合)
   importance = "impurity",  # 計算特徵重要度
   quantreg = TRUE,          # 開啟「分位數森林」→ 第 10 步用來算價格區間
   num.threads = parallel::detectCores() - 1
 )
-pred_rf <- predict(rf_fit, prep_x(test))$predictions
+pred_rf <- predict(rf_fit, prep_x(test, features, fac_levels))$predictions
 results <- bind_rows(results, evaluate("2. 隨機森林", pred_rf))
 
 # --- 8. XGBoost (梯度提升樹) --------------------------------------------------
 # 概念：一棵接一棵種樹，每一棵新樹專門修正「前面所有樹還猜錯的部分」。
 # 通常是表格資料最準的模型，但參數比較多、比較容易過度擬合，所以要用「驗證集 + 提早停止」。
-to_matrix <- function(d) {
-  x <- prep_x(d)
-  # XGBoost 只吃數字：類別欄位轉成整數編號 (樹模型可以接受這種編碼)
-  x %>% mutate(across(where(is.factor), as.integer)) %>% as.matrix()
-}
+# to_matrix()、xgb_params 定義在 R/model_lib.R (回測、實驗、屋況調整共用同一組參數)
 # 從訓練集再切最後 3 個月當「驗證集」，用來決定要種幾棵樹 (early stopping)
 valid_idx <- train$t_month_idx > (cut_month - 3)
-dtrain <- xgb.DMatrix(to_matrix(train[!valid_idx, ]), label = train$y[!valid_idx])
-dvalid <- xgb.DMatrix(to_matrix(train[valid_idx, ]),  label = train$y[valid_idx])
+dtrain <- xgb.DMatrix(to_matrix(train[!valid_idx, ], features, fac_levels), label = train$y[!valid_idx])
+dvalid <- xgb.DMatrix(to_matrix(train[valid_idx, ], features, fac_levels),  label = train$y[valid_idx])
 
-xgb_params <- list(
-  objective = "reg:squarederror",
-  eta = 0.1,                # 學習率：每棵樹只修正一點點，慢慢逼近 → 比較不會過度擬合
-                            # (原本 0.05 + 3000 棵樹，模型在記憶體裡 126MB，免費主機只有 1GB；
-                            #  改 0.1 + 最多 1500 棵，大小約減半，準確度差異見學習筆記)
-  max_depth = 8,            # 每棵樹最多幾層：越深越能抓複雜關係，也越容易過擬合
-  subsample = 0.8,          # 每棵樹只用 80% 資料
-  colsample_bytree = 0.8,   # 每棵樹只用 80% 欄位
-  min_child_weight = 10,
-  # 固定 XGBoost 自己的亂數種子 (subsample / colsample 抽樣用)。
-  # 搭配 SQL 的 ORDER BY (資料順序固定)：同一份資料重訓 = 同一個模型，估價不會因為「運氣」跳動。
-  # 剩下的變動才是「新資料帶來的真實行情變化」(實驗 01 量過：沒固定時同一間房子可以差 13%)
-  seed = 42
-)
 xgb_fit <- xgb.train(
   params = xgb_params, data = dtrain, nrounds = 1500,
   evals = list(train = dtrain, valid = dvalid),
   early_stopping_rounds = 100,   # 驗證集分數連續 100 輪沒進步就停 → 自動找到最佳樹數
   verbose = 0
 )
-pred_xgb <- predict(xgb_fit, to_matrix(test))
+pred_xgb <- predict(xgb_fit, to_matrix(test, features, fac_levels))
 results <- bind_rows(results, evaluate("3. XGBoost", pred_xgb))
 
 # --- 9. 比較成績 --------------------------------------------------------------
@@ -250,7 +139,7 @@ test %>% mutate(ape = abs(exp(pred_xgb) - exp(y)) / exp(y)) %>%
 # --- 10. 價格區間 (行情區間) --------------------------------------------------
 # 一個點估計 (例如 28.5 萬/坪) 對使用者不夠：他想知道「合理範圍」。
 # 分位數森林可以直接給出 P10 ~ P90：80% 的同條件房子會落在這個區間內。
-q <- predict(rf_fit, prep_x(test), type = "quantiles", quantiles = c(0.1, 0.5, 0.9))$predictions
+q <- predict(rf_fit, prep_x(test, features, fac_levels), type = "quantiles", quantiles = c(0.1, 0.5, 0.9))$predictions
 coverage <- mean(test$y >= q[, 1] & test$y <= q[, 3])
 message("[隨機森林] P10~P90 區間實際涵蓋率：", scales::percent(coverage, 0.1), " (理想值約 80%)")
 
@@ -269,7 +158,7 @@ xgbq_fit <- xgb.train(
   data = dtrain, nrounds = 600,
   evals = list(valid = dvalid), early_stopping_rounds = 100, verbose = 0
 )
-qx <- predict(xgbq_fit, to_matrix(test))          # 回傳 n × 3 的矩陣：P10, P50, P90
+qx <- predict(xgbq_fit, to_matrix(test, features, fac_levels))          # 回傳 n × 3 的矩陣：P10, P50, P90
 # 保形校正 (Conformal calibration)：分位數模型的區間常常「太有自信」(太窄)。
 # 做法：在驗證集上量「真實值超出區間多少」，取這個超出量的第 80 百分位當作加寬量 q_hat。
 #   E = max(P10 - 真實值, 真實值 - P90)：落在區間內時 E 是負的，跑出去時 E 是正的
@@ -295,7 +184,7 @@ print(results %>% mutate(across(c(MAPE, hit_10, hit_20), \(x) scales::percent(x,
 #   超過 5%        ：判定異常 → 這裡直接 stop()，GitHub Actions 的部署工作不會執行，網站繼續用上週的模型
 # 參考檔放在 geo_data/ (GitHub Actions 會快取這個資料夾，下週還拿得到)
 drift_file <- "geo_data/drift_ref.rds"
-drift_x <- to_matrix(test %>% slice_sample(n = min(5000, nrow(test))))
+drift_x <- to_matrix(test %>% slice_sample(n = min(5000, nrow(test))), features, fac_levels)
 if (file.exists(drift_file)) {
   ref <- readRDS(drift_file)
   if (identical(ref$features, features)) {
@@ -310,6 +199,7 @@ saveRDS(list(features = features, x = drift_x, pred = predict(xgb_fit, drift_x),
 # --- 12. 存模型 + 示範預測 ----------------------------------------------------
 dir.create("models", showWarnings = FALSE)
 model_meta <- list(features = features,
+                   price_bounds = as.data.frame(price_bounds(df_raw)),   # 離群值門檻：網站篩選同棟歷史要用同一組
                    factor_levels = fac_levels, t_month_idx_max = max(df$t_month_idx),
                    trained_at = Sys.time(), metrics = results)
 # 完整版 (含隨機森林)：分位數森林會把整份訓練資料存在模型裡 → 檔案約 300MB 以上，只留在本機
@@ -325,6 +215,9 @@ nbr_table <- build_nbr_table(df$tx, df$ty, as.character(df$b_category), df$t_mon
                              ref_month = max(df$t_month_idx))
 saveRDS(as.data.frame(nbr_table), "models/nbr_table.rds")
 saveRDS(road_tbl, "models/road_class.rds", compress = "xz")         # App 算臨路等級用 (見 shared_features.R)
+# 訓練與網站一致性測試的標準答案：300 筆真實成交「用訓練算法」算出的模型輸入
+# (部署前 tests/serving_consistency.R 會用網站的算法再算一次，逐欄比對；說明見 R/model_lib.R)
+saveRDS(make_serving_fixture(df, features, fac_levels), "models/serving_check.rds")
 
 # 示範：「高雄市鳳山區 (五甲) 瑞隆東路附近、35 年透天、建物 82 坪、土地 30 坪、無車位」
 # 經緯度從 geo_data/road_lookup.rds 查「瑞隆東路」的代表點 → 和 App 用的是同一套方法
@@ -343,7 +236,7 @@ case <- bind_cols(case, facility_features(case_xy, readRDS("geo_data/facilities.
                   # 示範案例只有路名、沒有門牌 → 沒有同棟歷史 (bld_n = 0)
                   data.frame(bld_lp = NA_real_, bld_n = 0L, bld_dt = NA_real_),
                   road_features("瑞隆東路", case_xy, road_tbl))
-case_x <- prep_x(case)   # prep_x 已經用固定的 fac_levels，編號一定和訓練時一致
+case_x <- prep_x(case, features, fac_levels)   # prep_x 已經用固定的 fac_levels，編號一定和訓練時一致
 q_case <- exp(predict(rf_fit, case_x, type = "quantiles", quantiles = c(.1, .5, .9))$predictions)
 p_xgb  <- exp(predict(xgb_fit, case_x %>% mutate(across(where(is.factor), as.integer)) %>% as.matrix()))
 cat(sprintf("\n單價 (XGBoost)：%.1f 萬/坪\n行情區間 (RF P10~P90)：%.1f ~ %.1f 萬/坪\n總價估計：%.0f 萬 (區間 %.0f ~ %.0f 萬)\n",

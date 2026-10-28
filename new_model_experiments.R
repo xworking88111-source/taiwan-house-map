@@ -10,25 +10,18 @@
 #   source("new_model_experiments.R")    # 讀資料、準備好訓練集/測試集 (約 2 分鐘)
 #   然後呼叫下面的函數做實驗，見檔案最後的「實驗」區塊
 # ==============================================================================
-library(tidyverse)
 library(xgboost)
 
-source(file.path(Sys.getenv("RE_PROJECT_PATH", "/Volumes/Dzzz_ssd/R所有資料/R_code/Code/All_data"), "config.R"))
+# --- 1. 共用函式庫：讀資料、清理、特徵工程 (和訓練程式同一份，見 R/model_lib.R) ----------------
+source(file.path(Sys.getenv("RE_PROJECT_PATH", "/Volumes/Dzzz_ssd/R所有資料/R_code/Code/All_data"), "R", "model_lib.R"))
 setwd(project_path)
-
-# --- 1. 沿用訓練程式的「讀資料、清理、特徵工程」(和回測程式相同的作法，不複製程式碼) ---------
-src <- readLines("new_model_training.R")
-eval(parse(text = src[1:(grep("^# --- 4\\.", src) - 1)]))          # → df
-exprs <- parse("new_model_training.R")
-take <- function(name) {
-  hit <- Filter(function(e) is.call(e) && identical(e[[1]], as.name("<-")) && identical(e[[2]], as.name(name)), exprs)
-  eval(hit[[1]], globalenv())
-}
-for (nm in c("features_v1", "features", "fac_levels", "prep_x", "to_matrix", "xgb_params")) take(nm)
-features_base <- features
+df <- load_training_data() %>% clean_trades() %>% engineer_features()
+fac_levels <- make_fac_levels(df)
+features_base <- features_v2           # 實驗 01~04 的起點 = v2 (當時的正式模型)
 
 # --- 2. 固定的實驗設定：測試期 = 最近 6 個月，驗證集 = 訓練期最後 3 個月 ---------------------
 cut_month <- max(df$t_month_idx) - 6
+# 附近行情 (v2 就有的特徵)；同棟歷史 bld_* 由需要的實驗自己算 (見 experiments/02)
 df <- bind_cols(df, neighbor_price(df$tx, df$ty, as.character(df$b_category), df$t_month_idx, df$y,
                                    cap_month = cut_month))
 split_data <- function(d = df) {
@@ -40,17 +33,15 @@ split_data <- function(d = df) {
 # --- 3. 訓練與評分 -------------------------------------------------------------------------
 # seed：XGBoost 的 subsample / colsample (每棵樹隨機抽 80% 資料和欄位) 用到隨機數。
 #       同時設定 R 的 set.seed() 和 XGBoost 自己的 seed 參數，確保「同一台電腦」上結果可重現
-fit_xgb <- function(sp, feats = features, params = xgb_params, nrounds = 1500, seed = 1) {
-  features <<- feats                                              # prep_x() 讀的是全域的 features
+fit_xgb <- function(sp, feats = features_base, params = xgb_params, nrounds = 1500, seed = 1) {
   set.seed(seed)
-  dtrain <- xgb.DMatrix(to_matrix(sp$train), label = sp$train$y)
-  dvalid <- xgb.DMatrix(to_matrix(sp$valid), label = sp$valid$y)
+  dtrain <- xgb.DMatrix(to_matrix(sp$train, feats, fac_levels), label = sp$train$y)
+  dvalid <- xgb.DMatrix(to_matrix(sp$valid, feats, fac_levels), label = sp$valid$y)
   xgb.train(params = modifyList(params, list(seed = seed)), data = dtrain, nrounds = nrounds,
             evals = list(valid = dvalid), early_stopping_rounds = 100, verbose = 0)
 }
-predict_xgb <- function(models, d, feats = features) {
-  features <<- feats
-  x <- to_matrix(d)
+predict_xgb <- function(models, d, feats = features_base) {
+  x <- to_matrix(d, feats, fac_levels)
   # 多個模型 → 在 log 尺度上平均 (等於價格的幾何平均)
   rowMeans(sapply(if (inherits(models, "xgb.Booster")) list(models) else models, predict, newdata = x))
 }

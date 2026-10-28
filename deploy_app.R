@@ -8,7 +8,6 @@
 #        SHINYAPPS_NAME=你的帳號
 #        SHINYAPPS_TOKEN=xxxx
 #        SHINYAPPS_SECRET=xxxx
-#        ANTHROPIC_API_KEY=sk-ant-...   (選填，要啟用 AI 複檢才需要)
 #      存檔後重新啟動 R。
 #   ⚠️ 這些是密碼等級的資訊：只放在 .Renviron，永遠不要寫進程式碼、不要上傳 GitHub。
 #
@@ -26,12 +25,8 @@ rsconnect::setAccountInfo(name = acct,
                           token = Sys.getenv("SHINYAPPS_TOKEN"),
                           secret = Sys.getenv("SHINYAPPS_SECRET"))
 
-# AI 複檢的金鑰：寫進 app/.Renviron，跟著 App 上傳到 shinyapps.io (伺服器端讀得到，使用者看不到)
-# app/.Renviron 已列在 .gitignore，不會被上傳到 GitHub
-renv_file <- file.path("app", ".Renviron")
-if (nzchar(Sys.getenv("ANTHROPIC_API_KEY"))) {
-  writeLines(paste0("ANTHROPIC_API_KEY=", Sys.getenv("ANTHROPIC_API_KEY")), renv_file)
-}
+# (舊版這裡會把 ANTHROPIC_API_KEY 寫進 app/.Renviron 跟著網站上傳。AI 複檢改成「複製提示詞」、
+#  不再呼叫付費 API 之後，這段已經用不到 → 刪掉。不用的金鑰流程留著，就是哪天誤設金鑰時的洩漏風險)
 
 # 套件來源的網址：rsconnect 會告訴 shinyapps.io「每個套件從哪裡下載」。
 # GitHub Actions 是從名為「RSPM」的套件庫安裝套件的，如果沒告訴 rsconnect RSPM 的網址，
@@ -54,8 +49,7 @@ app_files <- c("app.R", "shared_features.R",
                "data/meta.rds", "data/condition_adjust.rds", "data/towns.rds", "data/road_lookup.rds",
                "data/facilities.rds", "data/nbr_table.rds",            # v2：空間特徵
                "data/road_class.rds",                                  # v3：臨路等級
-               "models/price_model.rds", "models/xgb_point.ubj", "models/xgb_quant.ubj",
-               if (file.exists(renv_file)) ".Renviron")
+               "models/price_model.rds", "models/xgb_point.ubj", "models/xgb_quant.ubj")
 # 部署前檢查：deployApp() 遇到缺檔只會「警告」、照樣部署 → App 上線後一打開就當掉。
 # 所以少任何一個檔案就直接停止，讓問題在部署前就被發現
 missing <- app_files[!file.exists(file.path("app", app_files))]

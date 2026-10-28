@@ -23,7 +23,7 @@
 #   就只重跑 ③，幾分鐘搞定。這也是業界 CI/CD「建置 (build) 與部署 (deploy) 分離」的做法。
 #
 # 要先在 GitHub repo 設定 Secrets (Settings → Secrets and variables → Actions)：
-#   SHINYAPPS_NAME、SHINYAPPS_TOKEN、SHINYAPPS_SECRET、ANTHROPIC_API_KEY (選填)
+#   SHINYAPPS_NAME、SHINYAPPS_TOKEN、SHINYAPPS_SECRET
 # Secrets 是加密保存的，log 裡也會自動遮蔽，不會外洩。
 # ==============================================================================
 name: weekly-data-update
@@ -111,13 +111,25 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      # 鎖定套件版本：用 Posit Package Manager「某一天的快照」，而不是 latest
+      #   latest = 每次都裝當天最新版 → 哪天 xgboost、sf、data.table 改版，模型可能悄悄變了 (跳動檢查會擋，但最好別發生)
+      #   快照 = 整個 CRAN 停在那一天 → 每週訓練用的都是同一組「驗證過」的套件版本
+      #   要升級：把日期改成新的一天 → 本機跑測試和回測 → 成績沒變差才 push
+      # setup-r 會讀 RSPM 這個環境變數 (見 r-lib/actions 原始碼)，codename = Ubuntu 版本代號 (二進位套件要對應作業系統)
+      # 只鎖「建置」工作 (訓練模型的地方)；部署工作照常用 latest，避免動到 shinyapps.io 的套件來源設定 (第 14 章的坑)
+      - name: 鎖定套件快照日期
+        run: |
+          . /etc/os-release
+          echo "RSPM=https://packagemanager.posit.co/cran/__linux__/${VERSION_CODENAME}/2026-10-27" >> "$GITHUB_ENV"
       - uses: r-lib/actions/setup-r@v2
         with:
+          r-version: '4.6.1'           # R 本身也固定版本 (原本是 release = 最新版)
           use-public-rspm: true
       - name: 安裝系統函式庫 (sf 需要的 GIS 工具)
         run: sudo apt-get update && sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
+          cache-version: 2             # 改了快照日期 → 換一組新的套件快取，不要沿用舊的
           packages: |
             tidyverse
             DBI
@@ -133,6 +145,8 @@ jobs:
 
       # 自動化測試：特徵函數的規則 (防資料洩漏、地址解析…) 先驗證，有錯就不往下跑 (約 10 秒)
       # 放在最前面 = fail fast：程式邏輯錯了，下載資料 20 分鐘也是白費
+      - name: 記錄套件版本 (之後模型有變化時，可以對照是不是套件版本造成的)
+        run: Rscript -e 'for (p in c("xgboost","data.table","sf","RANN","ranger","dplyr")) cat(p, as.character(packageVersion(p)), "\n"); cat("repos:", getOption("repos"), "\n")'
       - name: 自動化測試 (testthat)
         run: Rscript tests/run_tests.R
 
@@ -224,10 +238,13 @@ jobs:
           name: app-bundle
           path: app
 
+      # 部署前最後一道檢查：網站算出的特徵和訓練時一不一樣 (training-serving skew 測試，說明見檔案開頭)
+      - name: 訓練與網站一致性測試
+        run: Rscript tests/serving_consistency.R
+
       - name: 部署到 shinyapps.io
         env:
           SHINYAPPS_NAME: ${{ secrets.SHINYAPPS_NAME }}
           SHINYAPPS_TOKEN: ${{ secrets.SHINYAPPS_TOKEN }}
           SHINYAPPS_SECRET: ${{ secrets.SHINYAPPS_SECRET }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: Rscript deploy_app.R

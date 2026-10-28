@@ -116,9 +116,11 @@ source(file.path(project_path, "app", "shared_features.R"))
 # 為什麼只能用「之前」的月份？(資料洩漏 data leakage)
 #   如果用到同月份或之後的成交，等於讓模型偷看答案。上線時我們不會知道未來的成交。
 #   cap_month：回測時「切點之後」的資料在真實世界還不存在，所以時間窗最多只能到切點。
-neighbor_price <- function(x, y, type, month, logp, cap_month = Inf, window = 12, min_n = 3) {
+# query_month：「站在哪個月份往回看」，預設 = 每筆自己的交易月份 (訓練用)。
+#   一致性測試會設成「資料最新月份」，模擬網站估價的當下 (見 R/model_lib.R 的 make_serving_fixture)
+neighbor_price <- function(x, y, type, month, logp, cap_month = Inf, window = 12, min_n = 3, query_month = month) {
   dt <- data.table(cx = floor(x / cell_size), cy = floor(y / cell_size), type = type, m = month, lp = logp)
-  dt[, id := .I]
+  dt[, `:=`(id = .I, qm = query_month)]
   calc <- function(type_key) {
     # (1) 先按「格子 × 型態 × 月份」加總，再算每個格子的累計值 (cumsum)
     src <- if (type_key == "same") dt[, .(cx, cy, type, m, lp)] else dt[, .(cx, cy, type = "ALL", m, lp)]
@@ -126,7 +128,7 @@ neighbor_price <- function(x, y, type, month, logp, cap_month = Inf, window = 12
     agg[, `:=`(cs = cumsum(s), cn = cumsum(n)), by = .(cx, cy, type)]
     # (2) 每筆交易 × 9 個鄰近格子 → 查詢「時間窗結尾」和「開頭前一個月」的累計值，相減 = 窗內加總
     q <- dt[, .(id, cx, cy, type = if (type_key == "same") type else "ALL",
-                hi = pmin(m - 1, cap_month), lo = m - window - 1)]
+                hi = pmin(qm - 1, cap_month), lo = qm - window - 1)]
     q <- q[rep(seq_len(.N), each = 9)][, `:=`(cx = cx + rep(-1:1, each = 3), cy = cy + rep(-1:1, times = 3))]
     # roll = TRUE：找「月份 <= 查詢月份」的最後一筆累計值 (rolling join，data.table 的招牌功能)
     hi <- agg[q, on = .(cx, cy, type, m = hi), roll = TRUE, .(id, cs, cn)]
@@ -158,12 +160,14 @@ build_nbr_table <- function(x, y, type, month, logp, ref_month) {
 # --- 同棟歷史成交 (實驗 02 驗證有效：MAPE 12.5% → 12.2%) -------------------------
 # 每筆交易：同門牌 (addr_key，不含樓層) 在它之前 window 個月內的成交 → 平均 log 單價、筆數、平均距今月數
 # 防洩漏：只看更早的月份；cap_month 以後的成交一律看不到 (測試期 = 站在 cap_month+1 往回看)
-building_history <- function(addr_key, month, logp, cap_month = Inf, window = 36) {
+building_history <- function(addr_key, month, logp, cap_month = Inf, window = 36, query_month = month) {
   hist <- data.table(k = addr_key, hm = month, lp = logp)[hm <= cap_month]
-  q <- data.table(k = addr_key, m = pmin(month, cap_month + 1))   # 測試期：等同站在 cut_month+1 往回看
+  q <- data.table(k = addr_key, m = pmin(query_month, cap_month + 1))   # 測試期：等同站在 cut_month+1 往回看
   q[, `:=`(lo = m - window, hi = m - 1)]
   res <- hist[q, on = .(k, hm >= lo, hm <= hi),
-              .(bld_lp = mean(lp), bld_n = sum(!is.na(lp)), bld_dt = mean(i.m - hm)), by = .EACHI]
+              .(bld_lp = mean(lp), bld_n = sum(!is.na(lp)), bld_dt = mean(i.m - x.hm)), by = .EACHI]
+  # ⚠️ 一定要寫 x.hm：非等值連接 (non-equi join) 時，j 裡直接寫 hm 拿到的不是每筆成交的月份
+  #    (舊版寫 hm，只有一筆舊成交時剛好正確，多筆時就算錯；見 tests/testthat/test-building_history.R)
   res[bld_n == 0, `:=`(bld_lp = NA_real_, bld_dt = NA_real_)]
   as_tibble(res[, .(bld_lp, bld_n, bld_dt)])
 }

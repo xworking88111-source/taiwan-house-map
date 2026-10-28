@@ -41,3 +41,11 @@ test_that("輸出筆數和順序跟輸入一致", {
   slow_n <- sapply(seq_along(k), function(i) sum(k == k[i] & m < m[i] & m >= m[i] - 36))
   expect_equal(r$bld_n, slow_n)
 })
+
+test_that("多筆舊成交時，平均距今月數 bld_dt 要用「每一筆」的月份算 (data.table x.hm 的回歸測試)", {
+  # 第 43 個月的房子，之前有第 28、41 個月兩筆 → 距今 15、2 個月 → 平均 8.5
+  r <- building_history(rep("A", 3), c(28, 41, 43), log(c(10, 20, 30)))
+  expect_equal(r$bld_n[3], 2)
+  expect_equal(r$bld_dt[3], 8.5)
+  expect_equal(r$bld_lp[3], mean(log(c(10, 20))))
+})

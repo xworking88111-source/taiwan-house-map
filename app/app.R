@@ -59,15 +59,18 @@ types       <- c("電梯大樓", "華廈", "公寓", "透天厝", "套房", "店
 home_types  <- types[1:5]
 # 配色原則：每種型態的顏色「色相」要差很多，一眼就分得出來
 # (第一版店面用粉紅、透天厝用紅色，兩條線幾乎分不出來)
-type_colors <- c("電梯大樓" = "#0F766E", "華廈" = "#2563EB", "公寓" = "#F59E0B",
-                 "透天厝" = "#DC2626", "套房" = "#7C3AED", "店面" = "#92400E", "辦公商業" = "#374151",
-                 "農舍" = "#65A30D", "廠辦工廠" = "#9CA3AF", "土地" = "#4D7C0F", "車位" = "#475569")
+# 2026 改版配色「電光紫 × 珊瑚粉」：主色、強調色集中在這裡，CSS、圖表、地圖都引用同一組 (改色只要改這裡)
+brand <- list(primary = "#7C3AED", accent = "#F43F5E", orange = "#FF8A3D", cyan = "#06B6D4",
+              ink = "#1E1B4B", muted = "#6B6A8A", soft = "#E9E5FF", bg = "#FAF7FF")
+type_colors <- c("電梯大樓" = "#7C3AED", "華廈" = "#06B6D4", "公寓" = "#F59E0B",
+                 "透天厝" = "#F43F5E", "套房" = "#10B981", "店面" = "#2563EB", "辦公商業" = "#475569",
+                 "農舍" = "#84CC16", "廠辦工廠" = "#A8A29E", "土地" = "#65A30D", "車位" = "#64748B")
 
 # 五種交易類別 (見 new_export_app_data.R 的說明)
 categories <- c("成屋" = "成屋", "預售屋 (契約)" = "預售屋", "預售交屋" = "預售交屋",
                 "土地" = "土地", "車位" = "車位")
-cat_colors <- c("成屋" = "#0F766E", "預售屋" = "#2563EB", "預售交屋" = "#7C3AED",
-                "土地" = "#65A30D", "車位" = "#475569")
+cat_colors <- c("成屋" = "#7C3AED", "預售屋" = "#F43F5E", "預售交屋" = "#06B6D4",
+                "土地" = "#84CC16", "車位" = "#FF8A3D")
 building_cats <- c("成屋", "預售屋", "預售交屋")    # 有建物、可以畫到「每棟建物」的類別
 
 # 每種類別要看的「價格指標」：建物類 = 每坪單價；土地 = 每坪土地單價；車位 = 每個車位的總價
@@ -91,11 +94,12 @@ add_basemap <- function(map) {
 # 配色：優先用「分位數」切 7 級 (房價差距很大，等距切會幾乎全部同色)。
 # ⚠️ 只選一個行政區、或資料很少時，分位數的切點會重複，colorQuantile 會直接報錯
 #    → 整個 Shiny 連線斷掉、畫面變灰 (第一版的 bug)。所以切點重複時改用連續色階。
+map_ramp <- c("#FFF4D6", "#FFC98B", "#FF8A6B", "#F43F5E", "#C026D3", "#6D28D9", "#3B0764")
 make_pal <- function(values) {
   values <- values[!is.na(values)]
   br <- unique(quantile(values, seq(0, 1, length.out = 8), names = FALSE))
-  if (length(br) >= 3) colorBin("YlOrRd", domain = values, bins = br)
-  else colorNumeric("YlOrRd", domain = range(values) + c(-0.5, 0.5))
+  if (length(br) >= 3) colorBin(map_ramp, domain = values, bins = br)
+  else colorNumeric(map_ramp, domain = range(values) + c(-0.5, 0.5))
 }
 fmt_wan <- function(x, digits = 1) ifelse(is.na(x), "—", formatC(x, format = "f", digits = digits, big.mark = ","))
 
@@ -404,11 +408,14 @@ build_ai_prompt <- function(inp, pred, comps) {
 # --- 5. UI --------------------------------------------------------------------
 theme <- bs_theme(
   version = 5,
-  primary = "#0F766E", secondary = "#64748B", success = "#15803D", danger = "#B91C1C",
-  bg = "#F8FAFC", fg = "#0F172A",
-  base_font = font_google("Noto Sans TC"), heading_font = font_google("Noto Sans TC"),
-  "navbar-bg" = "#0F172A", "card-border-radius" = "0.75rem"
+  primary = brand$primary, secondary = brand$ink, success = "#10B981", danger = brand$accent, info = brand$cyan,
+  bg = brand$bg, fg = brand$ink,
+  base_font = font_google("Noto Sans TC"),
+  heading_font = font_google("Noto Sans TC", wght = c(700, 900)),
+  "navbar-bg" = brand$ink, "card-border-radius" = "1.25rem", "border-radius" = "0.75rem",
+  "input-border-radius" = "0.75rem", "btn-border-radius" = "999px"
 )
+
 
 year_slider <- function(id) {
   sliderInput(id, "交易年份", min = years[1], max = years[2], value = years, step = 1, sep = "")
@@ -419,6 +426,8 @@ ui <- page_navbar(
   theme = theme,
   fillable = TRUE,
   header = tags$head(
+    # 數字用比較有活力的幾何字體 Outfit (只有英文數字，中文仍然是 Noto Sans TC)
+    tags$link(rel = "stylesheet", href = "https://fonts.googleapis.com/css2?family=Outfit:wght@600;800&display=swap"),
     # 手機上按下「開始估價」：自動收起輸入表單、捲到估價結果 (否則表單會蓋住結果，使用者以為沒反應)
     tags$script(HTML("
       $(document).on('click', '#p_go', function() {
@@ -428,11 +437,52 @@ ui <- page_navbar(
         setTimeout(() => document.getElementById('p_unit').scrollIntoView({behavior: 'smooth', block: 'start'}), 450);
       });")),
     tags$style(HTML("
-    .bslib-value-box .value-box-title { font-size: .85rem; opacity: .85; }
-    .leaflet-container { border-radius: .75rem; }
+    /* ===== 2026 改版：鮮豔漸層、圓角、柔和陰影、微動畫 ===== */
+    :root { --brand: #7C3AED; --accent: #F43F5E; --orange: #FF8A3D; --cyan: #06B6D4; --ink: #1E1B4B; }
+    body { background:
+             radial-gradient(1200px 600px at 100% -10%, rgba(244,63,94,.10), transparent 60%),
+             radial-gradient(900px 500px at -10% 10%, rgba(124,58,237,.10), transparent 60%), #FAF7FF; }
+    /* 導覽列：深紫底 + 底部一條彩色漸層線 */
+    .navbar { background: linear-gradient(90deg, #1E1B4B 0%, #3B0764 100%) !important;
+              border-bottom: 3px solid transparent;
+              border-image: linear-gradient(90deg, #7C3AED, #F43F5E, #FF8A3D) 1; }
+    .navbar .nav-link.active { color: #fff !important; background: rgba(255,255,255,.12); border-radius: 999px; }
+    .navbar .nav-link { transition: background .2s; border-radius: 999px; padding-left: .9rem !important; padding-right: .9rem !important; }
+    .navbar .nav-link:hover { background: rgba(255,255,255,.08); }
+    .navbar .nav-link.active, .navbar .nav-link:focus { border-bottom-color: transparent !important; box-shadow: none !important; text-decoration: none; }
+    .navbar .nav-underline .nav-link.active { border-bottom: 0 !important; }
+    /* 卡片：白底、柔和陰影，滑過微微浮起 */
+    .card, .bslib-card { border: 1px solid rgba(124,58,237,.10); box-shadow: 0 8px 24px -12px rgba(30,27,75,.18);
+                         transition: transform .2s ease, box-shadow .2s ease; }
+    .bslib-card:hover { box-shadow: 0 14px 32px -12px rgba(124,58,237,.28); }
+    .card-header { background: transparent; font-weight: 700; border-bottom: 1px solid rgba(124,58,237,.08); }
+    /* 數值卡片：漸層 + 大字，依同一排的順序配色 (bslib 會把每張卡片包在 .bslib-grid-item 裡) */
+    .bslib-value-box { border: 0 !important; color: #fff !important; overflow: hidden;
+                       box-shadow: 0 12px 28px -12px rgba(124,58,237,.55); transition: transform .2s ease; }
+    .bslib-value-box:hover { transform: translateY(-3px); }
+    .bslib-grid > .bslib-grid-item:nth-child(4n+1) > .bslib-value-box { background: linear-gradient(135deg, #7C3AED, #F43F5E) !important; }
+    .bslib-grid > .bslib-grid-item:nth-child(4n+2) > .bslib-value-box { background: linear-gradient(135deg, #F43F5E, #FF8A3D) !important; }
+    .bslib-grid > .bslib-grid-item:nth-child(4n+3) > .bslib-value-box { background: linear-gradient(135deg, #4F46E5, #06B6D4) !important; }
+    .bslib-grid > .bslib-grid-item:nth-child(4n+4) > .bslib-value-box { background: linear-gradient(135deg, #1E1B4B, #7C3AED) !important; }
+    .bslib-value-box .value-box-title { font-size: .85rem; opacity: .9; letter-spacing: .02em; }
+    .bslib-value-box .value-box-value { font-family: 'Outfit', 'Noto Sans TC', sans-serif; font-weight: 800; letter-spacing: -.01em; }
+    .bslib-value-box .value-box-showcase { opacity: .35; }
+    /* 主要按鈕：漸層膠囊，滑過浮起發光 */
+    .btn-primary { background: linear-gradient(135deg, #7C3AED, #F43F5E); border: 0; font-weight: 700;
+                   box-shadow: 0 10px 22px -10px rgba(244,63,94,.65); transition: transform .15s ease, box-shadow .15s ease; }
+    .btn-primary:hover, .btn-primary:focus { transform: translateY(-2px); box-shadow: 0 14px 26px -10px rgba(124,58,237,.75);
+                   background: linear-gradient(135deg, #6D28D9, #E11D48); }
+    .btn-outline-secondary { border-radius: 999px; }
+    /* 側邊欄：淡紫底，輸入框 focus 時紫色光暈 */
+    .bslib-sidebar-layout > .sidebar { background: rgba(255,255,255,.75); backdrop-filter: blur(6px); }
+    .form-control:focus, .selectize-input.focus { border-color: #A78BFA !important; box-shadow: 0 0 0 .2rem rgba(124,58,237,.18) !important; }
+    .form-check-input:checked { background-color: #7C3AED; border-color: #7C3AED; }
+    .irs--shiny .irs-bar, .irs--shiny .irs-from, .irs--shiny .irs-to, .irs--shiny .irs-single { background: linear-gradient(90deg, #7C3AED, #F43F5E); border: 0; }
+    .control-label { font-weight: 600; }
+    .leaflet-container { border-radius: 1rem; }
     .legend { font-family: 'Noto Sans TC', sans-serif; }
     .ai-box { white-space: pre-wrap; line-height: 1.8; }
-    .small-note { font-size: .8rem; color: #64748B; }
+    .small-note { font-size: .8rem; color: #6B6A8A; }
     /* 相似成交明細：字大一點；除了地址以外的欄位不換行 (第一版日期、距離被拆成兩行) */
     .comps-table table { font-size: .95rem; width: 100%; }
     .comps-table td, .comps-table th { padding: .45rem .6rem !important; vertical-align: middle; }
@@ -807,7 +857,7 @@ server <- function(input, output, session) {
     rows <- head(x, 8)
     html <- sprintf(paste0(
       "<div style='font-size:13px;line-height:1.7;min-width:260px'><b>%s</b><br>",
-      "<span style='color:#64748B'>%s｜位置精準到%s</span><hr style='margin:4px 0'>",
+      "<span style='color:#6B6A8A'>%s｜位置精準到%s</span><hr style='margin:4px 0'>",
       "共 <b>%d</b> 筆交易%s｜中位數 <b style='color:#B91C1C'>%.1f %s</b>｜總價中位數 %s 萬",
       "<hr style='margin:4px 0'><small>最近交易：<br>%s</small></div>"),
       if (cat == "預售屋") paste0(clk$id, "<br><small>", x$address[1], "</small>") else x$address[1],
@@ -934,7 +984,7 @@ server <- function(input, output, session) {
     validate(need(nrow(d) > 0, "資料不足"))
     hl <- if (ex_in()$district != "全部") ex_in()$district else ""
     plot_ly(d, y = ~reorder(name, med), x = ~med, type = "bar", orientation = "h",
-            marker = list(color = ifelse(d$name == hl, "#B91C1C", "#0F766E")),
+            marker = list(color = ifelse(d$name == hl, brand$accent, brand$primary)),
             text = ~sprintf("%.1f", med), textposition = "outside",
             hovertemplate = paste0("%{y}：%{x:.1f} ", metric_unit(ex_in()$cat), "<extra></extra>")) %>%
       plot_layout(xaxis = list(title = metric_unit(ex_in()$cat)), yaxis = list(title = ""), hovermode = "closest")
@@ -1060,7 +1110,7 @@ server <- function(input, output, session) {
              sel = cond == (input$p_cond %||% "一般"),
              label = factor(label, levels = rev(unname(short[cond_levels]))))
     plot_ly(d, y = ~label, x = ~total, type = "bar", orientation = "h",
-            marker = list(color = ifelse(d$sel, "#0F766E", "#CBD5E1")),
+            marker = list(color = ifelse(d$sel, brand$primary, brand$soft)),
             text = ~sprintf("%s 萬 (%.1f 萬/坪)", fmt_wan(total, 0), unit), textposition = "auto",
             hovertemplate = "%{y}<br>總價約 %{x:,.0f} 萬<extra></extra>") %>%
       plot_layout(xaxis = list(title = "預估總價 (萬)"), yaxis = list(title = ""), hovermode = "closest",
@@ -1093,19 +1143,19 @@ server <- function(input, output, session) {
     p <- plot_ly()
     if (nrow(c) > 0) {
       p <- p %>% add_markers(data = c, x = ~ping, y = ~unit_wan, name = "相似成交",
-                             marker = list(size = 11, color = "#64748B", opacity = 0.8),
+                             marker = list(size = 11, color = brand$cyan, opacity = 0.75),
                              text = ~sprintf("%s<br>%s｜屋齡 %d 年", address, format(trans_ym, "%Y-%m"),
                                              as.integer(age)),
                              hovertemplate = "%{text}<br>%{x:.1f} 坪｜%{y:.1f} 萬/坪<extra></extra>")
     }
     p %>%
       add_markers(x = e$inp$ping, y = e$pred$point / 1e4, name = "本物件預估",
-                  marker = list(size = 18, color = "#B91C1C", symbol = "star"),
-                  error_y = list(type = "data", symmetric = FALSE, color = "#B91C1C",
+                  marker = list(size = 20, color = brand$accent, symbol = "star"),
+                  error_y = list(type = "data", symmetric = FALSE, color = brand$accent,
                                  array = (e$pred$p90 - e$pred$point) / 1e4,
                                  arrayminus = (e$pred$point - e$pred$p10) / 1e4),
                   hovertemplate = "預估 %{y:.1f} 萬/坪<extra></extra>") %>%
-      plot_layout(xaxis = list(title = "建物坪數"), yaxis = list(title = "單價 (萬/坪)"), hovermode = "closest")
+      plot_layout(xaxis = list(title = "權狀坪數"), yaxis = list(title = "單價 (萬/坪)"), hovermode = "closest")
   })
 
   output$p_map <- renderLeaflet({
@@ -1114,7 +1164,7 @@ server <- function(input, output, session) {
       addAwesomeMarkers(lng = e$inp$lng, lat = e$inp$lat, label = "本物件 (估計位置)",
                         icon = awesomeIcons(icon = "star", markerColor = "red", library = "fa"))
     if (nrow(c) > 0) {
-      m <- m %>% addCircleMarkers(data = c, lng = ~lng, lat = ~lat, radius = 7, color = "#0F766E",
+      m <- m %>% addCircleMarkers(data = c, lng = ~lng, lat = ~lat, radius = 7, color = brand$primary,
                                   label = ~sprintf("%.1f 萬/坪｜%s", unit_wan, format(trans_ym, "%Y-%m")))
     }
     m

@@ -48,6 +48,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: r-lib/actions/setup-r@v2
         with:
+          r-version: '4.6.1'           # 固定版本：shinyapps.io 支援的 R 版本會晚幾天才跟上新版 (4.6.2 曾因此部署失敗)
           use-public-rspm: true        # 使用預先編譯好的套件，安裝快很多
       - name: 安裝系統函式庫 (sf 需要的 GIS 工具)
         run: sudo apt-get update && sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev
@@ -116,7 +117,7 @@ jobs:
       #   快照 = 整個 CRAN 停在那一天 → 每週訓練用的都是同一組「驗證過」的套件版本
       #   要升級：把日期改成新的一天 → 本機跑測試和回測 → 成績沒變差才 push
       # setup-r 會讀 RSPM 這個環境變數 (見 r-lib/actions 原始碼)，codename = Ubuntu 版本代號 (二進位套件要對應作業系統)
-      # 只鎖「建置」工作 (訓練模型的地方)；部署工作照常用 latest，避免動到 shinyapps.io 的套件來源設定 (第 14 章的坑)
+      # 套件快照只鎖「建置」工作 (訓練模型的地方)；部署工作的套件照常用 latest，避免動到 shinyapps.io 的套件來源設定。R 本身則每個工作都固定 4.6.1
       - name: 鎖定套件快照日期
         run: |
           . /etc/os-release
@@ -207,6 +208,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: r-lib/actions/setup-r@v2
         with:
+          r-version: '4.6.1'           # 固定版本：shinyapps.io 支援的 R 版本會晚幾天才跟上新版 (4.6.2 曾因此部署失敗)
           use-public-rspm: true
       - name: 安裝系統函式庫 (sf 需要的 GIS 工具)
         run: sudo apt-get update && sudo apt-get install -y libgdal-dev libgeos-dev libproj-dev libudunits2-dev
